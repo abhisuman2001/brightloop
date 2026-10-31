@@ -14,6 +14,7 @@ import {
   type ReactNode,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
+  useEffect,
 } from 'react';
 import { ApiError } from '../lib/api';
 import { number } from '../lib/format';
@@ -129,6 +130,12 @@ export function FormError({ error }: { error: unknown }) {
 
 export const fieldErrors = (error: unknown): Record<string, string> => (error instanceof ApiError && error.fields ? error.fields : {});
 
+/** Whether a form's fields already show this error. Keys like `variants.0.value` have no field of their own, so the summary must. */
+export const isShownOnField = (error: unknown, errors: Record<string, string>) => {
+  const keys = Object.keys(errors);
+  return keys.length > 0 && keys.every((key) => !key.includes('.') && key !== 'token') && !(error instanceof ApiError && error.fields?._);
+};
+
 // Surfaces
 
 export function Card({ children, className }: { children: ReactNode; className?: string }) {
@@ -191,6 +198,10 @@ export const TD = 'border-b border-slate-100 px-3 py-2 align-middle';
 
 export function Pagination({ page, pageSize, total, onPage, children }: { page: number; pageSize: number; total: number; onPage: (page: number) => void; children?: ReactNode }) {
   const pages = Math.max(1, Math.ceil(total / pageSize));
+  // The last row of the last page can leave the list, for example when an invoice is confirmed from a filtered view.
+  useEffect(() => {
+    if (page > pages) onPage(pages);
+  }, [page, pages, onPage]);
   const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const to = Math.min(page * pageSize, total);
   return (

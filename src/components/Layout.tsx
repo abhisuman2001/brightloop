@@ -147,15 +147,9 @@ function Breadcrumbs() {
           </span>
         </>
       ) : (
-        <>
-          <span aria-current="page" className="font-medium text-slate-900">
-            Dashboard
-          </span>
-          <ChevronRight className="size-3.5 shrink-0 text-slate-300" aria-hidden />
-          <Link to="/subscriptions" className="text-slate-500 hover:text-slate-800">
-            Subscriptions
-          </Link>
-        </>
+        <span aria-current="page" className="font-medium text-slate-900">
+          Dashboard
+        </span>
       )}
     </nav>
   );
@@ -181,7 +175,7 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
     return [
       ...data.subscriptions.map((s) => ({ key: `s${s.id}`, group: 'Subscriptions', to: `/subscriptions?sub=${s.id}`, title: s.number, detail: s.customerName, badge: <SubscriptionStatusBadge status={s.status} />, mono: true })),
       ...data.customers.map((c) => ({ key: `c${c.id}`, group: 'Customers', to: `/customers?cust=${c.id}`, title: c.name, detail: c.company || c.email, badge: null, mono: false })),
-      ...data.invoices.map((i) => ({ key: `i${i.id}`, group: 'Invoices', to: `/invoices?inv=${i.id}`, title: i.number, detail: `${i.customerName} · ${money(i.total)}`, badge: <InvoiceStatusBadge row={{ status: i.status, overdue: false }} />, mono: true })),
+      ...data.invoices.map((i) => ({ key: `i${i.id}`, group: 'Invoices', to: `/invoices?inv=${i.id}`, title: i.number, detail: `${i.customerName} · ${money(i.total)}`, badge: <InvoiceStatusBadge row={{ status: i.status, overdue: Boolean(i.overdue) }} />, mono: true })),
     ];
   }, [data, q]);
 
@@ -370,8 +364,14 @@ function Support() {
 export function useSignOut() {
   const client = useQueryClient();
   const navigate = useNavigate();
+  const toast = useToast();
   return async () => {
-    await api.post('/auth/logout');
+    try {
+      await api.post('/auth/logout');
+    } catch (err) {
+      // Still signed in on the server, so saying otherwise would be misleading on a shared computer.
+      return toast(err instanceof Error ? err.message : 'Could not sign out', 'error');
+    }
     client.clear();
     client.setQueryData(['me'], null);
     navigate('/login');
