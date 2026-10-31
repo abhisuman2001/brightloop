@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Ban, Check, CreditCard, Mail, Printer, X } from 'lucide-react';
+import { Ban, BellRing, Check, CreditCard, Mail, Printer, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { InvoiceDetail } from '../../shared/types';
@@ -46,6 +46,7 @@ export function InvoiceLinesTable({ invoice }: { invoice: InvoiceDetail }) {
             <tr key={line.id}>
               <td className={TD}>
                 <span className="text-slate-900">{line.productName}</span>
+                {line.hsnCode && <span className="num block text-xs text-slate-500">HSN/SAC {line.hsnCode}</span>}
                 {line.variantLabel && <span className="block text-xs text-slate-500">{line.variantLabel}</span>}
               </td>
               <td className={cx(TD, 'num text-right')}>{line.quantity}</td>
@@ -67,7 +68,7 @@ export function InvoiceLinesTable({ invoice }: { invoice: InvoiceDetail }) {
   );
 }
 
-export function InvoiceTotals({ invoice }: { invoice: Pick<InvoiceDetail, 'subtotal' | 'discountTotal' | 'taxTotal' | 'total' | 'amountPaid' | 'balance' | 'status'> }) {
+export function InvoiceTotals({ invoice }: { invoice: Pick<InvoiceDetail, 'subtotal' | 'discountTotal' | 'taxTotal' | 'taxBreakdown' | 'total' | 'amountPaid' | 'balance' | 'status'> }) {
   const Row = ({ label, value, strong }: { label: string; value: string; strong?: boolean }) => (
     <div className={cx('flex justify-between gap-8 py-0.5', strong && 'font-semibold text-slate-900')}>
       <dt className={strong ? '' : 'text-slate-500'}>{label}</dt>
@@ -78,7 +79,7 @@ export function InvoiceTotals({ invoice }: { invoice: Pick<InvoiceDetail, 'subto
     <dl className="ml-auto w-full max-w-64 text-[13px]">
       <Row label="Subtotal" value={money(invoice.subtotal)} />
       {invoice.discountTotal > 0 && <Row label="Discount" value={`-${money(invoice.discountTotal)}`} />}
-      <Row label="Tax" value={money(invoice.taxTotal)} />
+      {invoice.taxBreakdown.length > 0 ? invoice.taxBreakdown.map((t) => <Row key={t.name} label={t.name} value={money(t.amount)} />) : <Row label="Tax" value={money(invoice.taxTotal)} />}
       <Row label="Total" value={money(invoice.total)} strong />
       {invoice.amountPaid > 0 && <Row label="Paid" value={`-${money(invoice.amountPaid)}`} />}
       {invoice.status !== 'cancelled' && invoice.amountPaid > 0 && <Row label="Balance due" value={money(invoice.balance)} strong />}
@@ -110,6 +111,15 @@ export function InvoiceDrawer() {
       refreshAll();
       toast(result.emailStatus === 'logged' ? 'Recorded as sent. Set SMTP_URL to deliver email; see Settings > Email log.' : done);
       setCancelling(false);
+    },
+    onError: (err: Error) => toast(err.message, 'error'),
+  });
+
+  const remind = useMutation({
+    mutationFn: () => api.post<{ status: string }>(`/invoices/${id}/remind`),
+    onSuccess: ({ status }) => {
+      refreshAll();
+      toast(status === 'logged' ? 'Reminder recorded in the email log. Set SMTP_URL to deliver email.' : status === 'failed' ? 'The reminder could not be delivered.' : `Reminder sent to ${invoice?.customerEmail}`, status === 'failed' ? 'error' : 'success');
     },
     onError: (err: Error) => toast(err.message, 'error'),
   });
@@ -149,6 +159,7 @@ export function InvoiceDrawer() {
               </div>
               <Info label="Bill to" value={[invoice.customerEmail, invoice.customerAddress].filter(Boolean).join(' · ')} className="col-span-2" />
               <Info label="Sent" value={invoice.sentAt ? date(invoice.sentAt) : 'Not sent'} mono={Boolean(invoice.sentAt)} />
+              {invoice.lastReminderAt && <Info label="Last reminder" value={date(invoice.lastReminderAt)} mono />}
             </dl>
             <InvoiceLinesTable invoice={invoice} />
             <InvoiceTotals invoice={invoice} />
@@ -191,6 +202,11 @@ export function InvoiceDrawer() {
           <Button icon={<Mail className="size-3.5" />} disabled={invoice.status === 'draft' || invoice.status === 'cancelled'} title={invoice.status === 'draft' ? 'Confirm this invoice first' : undefined} loading={act.isPending} onClick={() => act.mutate({ path: 'send', done: `${invoice.number} sent to ${invoice.customerEmail}` })}>
             {invoice.sentAt ? 'Send again' : 'Send'}
           </Button>
+          {invoice.status === 'confirmed' && (
+            <Button icon={<BellRing className="size-3.5" />} loading={remind.isPending} onClick={() => remind.mutate()}>
+              Send reminder
+            </Button>
+          )}
           <a href={`/print/invoices/${invoice.id}`} target="_blank" rel="noreferrer" className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 text-[13px] font-medium text-slate-700 hover:bg-slate-50">
             <Printer className="size-3.5" aria-hidden />
             Print

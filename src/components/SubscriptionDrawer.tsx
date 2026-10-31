@@ -2,6 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Check, CreditCard, FileText, Mail, MoreHorizontal, Pause, Pencil, Play, RefreshCw, Send, X, XCircle, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { addDays } from '../../shared/dates';
 import type { SubscriptionDetail, SubscriptionStatus } from '../../shared/types';
 import { api, refreshAll } from '../lib/api';
 import { PERIOD_LABEL, PERIOD_UNIT, date, money, todayLocal } from '../lib/format';
@@ -14,12 +15,13 @@ import { Button, ConfirmDialog, Drawer, ErrorState, Field, IconButton, Input, Me
 
 const STAGES: SubscriptionStatus[] = ['draft', 'quotation', 'confirmed', 'active', 'closed'];
 
-export function PipelineTracker({ status }: { status: SubscriptionStatus }) {
+export function PipelineTracker({ status, activated = true }: { status: SubscriptionStatus; activated?: boolean }) {
   const current = STAGES.indexOf(status);
   return (
     <ol aria-label="Subscription status" className="flex w-full items-start">
       {STAGES.map((stage, i) => {
-        const done = i < current || status === 'closed';
+        // A quotation that was declined never went through Confirmed or Active.
+        const done = i < current && (status !== 'closed' || activated);
         const isCurrent = i === current;
         return (
           <li key={stage} aria-current={isCurrent ? 'step' : undefined} className="relative flex flex-1 flex-col items-center gap-1">
@@ -115,14 +117,12 @@ export function SubscriptionTotals({ sub }: { sub: SubscriptionDetail }) {
 export function RenewDialog({ open, onClose, sub, onRenew, loading, error }: { open: boolean; onClose: () => void; sub: SubscriptionDetail | undefined; onRenew: (expiry: string) => void; loading: boolean; error?: unknown }) {
   const [expiry, setExpiry] = useState('');
   useEffect(() => {
-    if (!open || !sub?.expiryDate) return;
-    const term = (Date.parse(sub.expiryDate) - Date.parse(sub.startDate)) / 86_400_000;
-    const base = sub.expiryDate > todayLocal() ? sub.expiryDate : todayLocal();
-    setExpiry(new Date(Date.parse(base) + Math.max(term, 1) * 86_400_000).toISOString().slice(0, 10));
+    if (open) setExpiry(sub?.defaultRenewalDate ?? '');
   }, [open, sub]);
+  const earliest = sub?.expiryDate ? addDays(sub.expiryDate > todayLocal() ? sub.expiryDate : todayLocal(), 1) : undefined;
   return (
     <ConfirmDialog open={open} onClose={onClose} title={`Renew ${sub?.number ?? ''}`} description={`Current expiry is ${date(sub?.expiryDate)}. Billing continues through the new date.`} confirmLabel="Renew" loading={loading} error={error} onConfirm={() => onRenew(expiry)}>
-      <Field label="New expiry date">{(id) => <Input id={id} type="date" min={sub?.expiryDate ?? undefined} value={expiry} onChange={(e) => setExpiry(e.target.value)} />}</Field>
+      <Field label="New expiry date">{(id) => <Input id={id} type="date" min={earliest} value={expiry} onChange={(e) => setExpiry(e.target.value)} />}</Field>
     </ConfirmDialog>
   );
 }
@@ -159,6 +159,12 @@ export function SubscriptionDrawer() {
       if (dialog !== 'close' && dialog !== 'renew') toast(err.message, 'error');
     },
   });
+
+  // An earlier failure must not show up in the next dialog, or on another subscription.
+  useEffect(() => {
+    act.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dialog, id]);
 
   const createInvoice = useMutation({
     mutationFn: () => api.post<{ invoiceId: number }>(`/subscriptions/${id}/invoice`),
@@ -253,7 +259,7 @@ export function SubscriptionDrawer() {
         {query.isError && <ErrorState error={query.error} onRetry={() => query.refetch()} />}
         {sub && (
           <>
-            <PipelineTracker status={sub.status} />
+            <PipelineTracker status={sub.status} activated={Boolean(sub.activatedAt)} />
             {sub.quoteExpired && (
               <p className="rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs text-rose-700">This quotation expired on {date(sub.quoteValidUntil)}. Edit its validity, or create a new one, before confirming.</p>
             )}

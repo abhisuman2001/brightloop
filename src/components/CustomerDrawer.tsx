@@ -9,7 +9,7 @@ import { useDrawer } from '../lib/hooks';
 import { InvoiceStatusBadge, SubscriptionBadges } from './badges';
 import { Info } from './InvoiceDrawer';
 import { SubscriptionForm } from './SubscriptionForm';
-import { Badge, Button, Drawer, ErrorState, Field, FormError, IconButton, Input, Modal, Skeleton, Textarea, fieldErrors, useToast } from './ui';
+import { Badge, Button, Drawer, ErrorState, Field, FormError, IconButton, Input, Modal, Skeleton, Textarea, fieldErrors, isShownOnField, useToast } from './ui';
 
 type CustomerDetail = Customer & { subscriptions: SubscriptionRow[]; invoices: InvoiceRow[]; hasPortalAccess: boolean };
 
@@ -59,10 +59,10 @@ export function CustomerForm({ open, onClose, editing, onCreated }: { open: bool
         <Field label="Name" error={errors.name}>{(id) => <Input id={id} {...bind('name')} autoFocus />}</Field>
         <Field label="Company" error={errors.company}>{(id) => <Input id={id} {...bind('company')} />}</Field>
         <Field label="Email" error={errors.email} className="col-span-2">{(id) => <Input id={id} type="email" {...bind('email')} />}</Field>
-        <Field label="Phone">{(id) => <Input id={id} {...bind('phone')} />}</Field>
-        <Field label="Tax ID">{(id) => <Input id={id} {...bind('taxId')} />}</Field>
-        <Field label="Billing address" className="col-span-2">{(id) => <Textarea id={id} {...bind('address')} />}</Field>
-        {Boolean(save.error) && Object.keys(errors).length === 0 && (
+        <Field label="Phone" error={errors.phone}>{(id) => <Input id={id} {...bind('phone')} />}</Field>
+        <Field label="GSTIN" error={errors.taxId}>{(id) => <Input id={id} placeholder="29ABCDE1234F1Z5" {...bind('taxId')} />}</Field>
+        <Field label="Billing address" error={errors.address} className="col-span-2">{(id) => <Textarea id={id} {...bind('address')} />}</Field>
+        {Boolean(save.error) && !isShownOnField(save.error, errors) && (
           <div className="col-span-2">
             <FormError error={save.error} />
           </div>
@@ -83,7 +83,8 @@ export function CustomerDrawer() {
     mutationFn: () => api.post<{ status: string }>(`/customers/${id}/invite`),
     onSuccess: ({ status }) => {
       refreshAll();
-      toast(status === 'logged' ? 'Invite recorded in the email log. Set SMTP_URL to deliver email.' : `Invite sent to ${customer?.email}`);
+      if (status === 'failed') toast(`The invite to ${customer?.email} could not be delivered. Its link is in Settings > Email log.`, 'error');
+      else toast(status === 'logged' ? 'Invite recorded in the email log. Set SMTP_URL to deliver email.' : `Invite sent to ${customer?.email}`);
     },
     onError: (err: Error) => toast(err.message, 'error'),
   });
@@ -109,7 +110,7 @@ export function CustomerDrawer() {
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-[13px] sm:grid-cols-4">
               <Info label="Email" value={customer.email} className="col-span-2" />
               <Info label="Phone" value={customer.phone} />
-              <Info label="Tax ID" value={customer.taxId} mono />
+              <Info label="GSTIN" value={customer.taxId} mono />
               <Info label="Address" value={customer.address} className="col-span-2" />
               <Info label="Monthly revenue" value={money(customer.monthlyAmount)} mono />
               <Info label="Outstanding" value={money(customer.outstanding)} mono tone={customer.outstanding > 0 ? 'text-amber-700' : undefined} />
