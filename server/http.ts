@@ -1,5 +1,6 @@
 import type { Request } from 'express';
 import type { ZodType } from 'zod';
+import { isValidDate } from '../shared/dates';
 
 export class HttpError extends Error {
   constructor(
@@ -37,11 +38,14 @@ export function str(value: unknown): string | undefined {
 
 export function isoDateParam(value: unknown): string | undefined {
   const s = str(value);
-  return s && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : undefined;
+  return s && isValidDate(s) ? s : undefined;
 }
 
+const MAX_PAGE = 1_000_000;
+
 export function paging(req: Request, maxSize = 100) {
-  const page = Math.max(1, Math.floor(Number(req.query.page)) || 1);
+  const requested = Math.floor(Number(req.query.page));
+  const page = requested >= 1 && requested <= MAX_PAGE ? requested : 1;
   const pageSize = Math.min(maxSize, Math.max(1, Math.floor(Number(req.query.pageSize)) || 25));
   return { page, pageSize, offset: (page - 1) * pageSize };
 }
@@ -62,4 +66,4 @@ export function toCsv(header: string[], rows: unknown[][]): string {
   return [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n') + '\r\n';
 }
 
-export const money = (cents: number) => (cents / 100).toFixed(2);
+export const money = (paise: number) => (paise / 100).toFixed(2);

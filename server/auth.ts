@@ -53,12 +53,13 @@ export function setSessionCookie(res: Response, token: string, expires: Date) {
   });
 }
 
-export function createPasswordToken(userId: number, hours: number): string {
+/** With `linkCustomerId`, using the link also attaches that customer record, because it proves the inbox is theirs. */
+export function createPasswordToken(userId: number, hours: number, linkCustomerId: number | null = null): string {
   const token = crypto.randomBytes(32).toString('base64url');
   db().prepare('UPDATE password_tokens SET used_at = ? WHERE user_id = ? AND used_at IS NULL').run(new Date().toISOString(), userId);
   db()
-    .prepare('INSERT INTO password_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
-    .run(sha256(token), userId, new Date(Date.now() + hours * 3_600_000).toISOString());
+    .prepare('INSERT INTO password_tokens (token_hash, user_id, expires_at, link_customer_id) VALUES (?, ?, ?, ?)')
+    .run(sha256(token), userId, new Date(Date.now() + hours * 3_600_000).toISOString(), linkCustomerId);
   return token;
 }
 

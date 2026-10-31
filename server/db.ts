@@ -259,6 +259,25 @@ const MIGRATIONS: string[] = [
     created_at TEXT NOT NULL
   );
   `,
+  `
+  ALTER TABLE subscriptions ADD COLUMN term_days INTEGER;
+  ALTER TABLE password_tokens ADD COLUMN link_customer_id INTEGER REFERENCES customers(id);
+  `,
+  `
+  ALTER TABLE invoices ADD COLUMN last_reminder_at TEXT;
+  ALTER TABLE invoices ADD COLUMN tax_breakdown_json TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE invoice_lines ADD COLUMN hsn_code TEXT NOT NULL DEFAULT '';
+  ALTER TABLE products ADD COLUMN hsn_code TEXT NOT NULL DEFAULT '';
+  ALTER TABLE tax_rules ADD COLUMN supply TEXT NOT NULL DEFAULT 'any' CHECK (supply IN ('any','intra','inter'));
+  -- Each reminder stage goes out once, however many times the job runs.
+  CREATE TABLE reminders (
+    kind TEXT NOT NULL,
+    entity_id INTEGER NOT NULL,
+    stage INTEGER NOT NULL,
+    sent_at TEXT NOT NULL,
+    PRIMARY KEY (kind, entity_id, stage)
+  );
+  `,
 ];
 
 let instance: DB | null = null;
