@@ -1,11 +1,12 @@
 import { z } from 'zod';
-import { addDays, daysBetween, firstBillingDateOnOrAfter, toMonthly, todayISO, type BillingPeriod } from '../../shared/dates';
-import { priceLines, type PricingDiscount, type PricingLine, type PricingTax } from '../../shared/pricing';
+import { addDays, daysBetween, firstBillingDateOnOrAfter, isBillableDate, toMonthly, todayISO, type BillingPeriod } from '../../shared/dates';
+import { priceLines, taxesForSale, type PricingDiscount, type PricingLine, type PricingTax } from '../../shared/pricing';
 import { subscriptionSchema } from '../../shared/schemas';
 import type { InvoiceRow, SubscriptionDetail, SubscriptionLine, SubscriptionRow, SubscriptionStatus } from '../../shared/types';
 import { db, nextNumber } from '../db';
 import { HttpError, conflict, notFound } from '../http';
 import { logActivity, type Actor } from './activity';
+import { sellerInfo } from './company';
 
 export type SubscriptionInput = z.output<typeof subscriptionSchema>;
 
@@ -45,7 +46,12 @@ export interface SubscriptionEntity {
   notes: string;
   recurring_amount: number;
   monthly_amount: number;
+  term_days: number | null;
 }
+
+/** SQL twin of isBillableDate, for queries that join subscriptions as s and plans as p. */
+export const BILLABLE_SQL = `(s.expiry_date IS NULL OR s.next_invoice_date < s.expiry_date
+  OR (s.next_invoice_date = s.expiry_date AND (s.next_invoice_date = s.start_date OR p.billing_period = 'daily')))`;
 
 export interface LineEntity {
   id: number;
@@ -58,6 +64,7 @@ export interface LineEntity {
   is_plan_line: number;
   product_name: string;
   product_type: string;
+  product_hsn: string;
   variant_attribute: string | null;
   variant_value: string | null;
 }
@@ -76,8 +83,13 @@ export function getSubscriptionEntity(id: number): SubscriptionEntity {
 
 export function loadTaxes(): PricingTax[] {
   return db()
-    .prepare('SELECT id, name, rate_bps AS rateBps, product_type AS productType FROM tax_rules WHERE active = 1')
+    .prepare('SELECT id, name, rate_bps AS rateBps, product_type AS productType, supply FROM tax_rules WHERE active = 1')
     .all() as PricingTax[];
+}
+
+/** The live rules that apply to a sale to this customer. */
+export function taxesForCustomer(taxes: PricingTax[], buyerGstin: string | null | undefined): PricingTax[] {
+  return taxesForSale(taxes, sellerInfo().gstin, buyerGstin);
 }
 
 export function loadDiscounts(): PricingDiscount[] {
@@ -104,7 +116,7 @@ export function loadDiscounts(): PricingDiscount[] {
 export function loadLines(subscriptionId: number): LineEntity[] {
   return db()
     .prepare(
-      `SELECT sl.*, p.name AS product_name, p.type AS product_type, v.attribute AS variant_attribute, v.value AS variant_value
+      `SELECT sl.*, p.name AS product_name, p.type AS product_type, p.hsn_code AS product_hsn, v.attribute AS variant_attribute, v.value AS variant_value
        FROM subscription_lines sl
        JOIN products p ON p.id = sl.product_id
        LEFT JOIN product_variants v ON v.id = sl.variant_id
@@ -175,18 +187,21 @@ function writeLines(subscriptionId: number, plan: PlanRow, input: Pick<Subscript
     `INSERT INTO subscription_lines (subscription_id, product_id, variant_id, quantity, unit_price, variant_extra, is_plan_line)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
+  // A line already on this subscription may stay after its product goes off sale; only new ones are refused.
+  const existing = new Set((db().prepare('SELECT product_id FROM subscription_lines WHERE subscription_id = ?').all(subscriptionId) as Array<{ product_id: number }>).map((l) => l.product_id));
   db().prepare('DELETE FROM subscription_lines WHERE subscription_id = ?').run(subscriptionId);
   const planProduct = resolveProductPrice(plan.product_id, input.planVariantId);
   insert.run(subscriptionId, plan.product_id, input.planVariantId ?? null, input.planQuantity, plan.price, planProduct.extra, 1);
   for (const line of input.lines) {
     const product = resolveProductPrice(line.productId, line.variantId);
-    if (!product.active) throw new HttpError(422, 'A selected product is no longer on sale');
+    if (!product.active && !existing.has(line.productId)) throw new HttpError(422, 'A selected product is no longer on sale');
     insert.run(subscriptionId, line.productId, line.variantId ?? null, line.quantity, product.salesPrice, product.extra, 0);
   }
 }
 
 function assertPlanAvailable(plan: PlanRow, startDate: string) {
-  if (!plan.active) throw new HttpError(422, `${plan.name} is not on sale`);
+  const product = db().prepare('SELECT active FROM products WHERE id = ?').get(plan.product_id) as { active: number } | undefined;
+  if (!plan.active || !product?.active) throw new HttpError(422, `${plan.name} is not on sale`);
   if (plan.start_date && startDate < plan.start_date) {
     throw new HttpError(422, `${plan.name} is available from ${plan.start_date}`, { startDate: `Plan is available from ${plan.start_date}` });
   }
@@ -239,6 +254,7 @@ export function updateSubscription(id: number, input: SubscriptionInput, actor: 
     }
     const plan = getPlan(input.planId);
     if (!live) assertPlanAvailable(plan, input.startDate);
+    if (!db().prepare('SELECT 1 FROM customers WHERE id = ?').get(input.customerId)) throw new HttpError(422, 'Choose a customer', { customerId: 'Choose a customer' });
     db()
       .prepare(
         `UPDATE subscriptions SET customer_id = ?, plan_id = ?, template_id = ?, start_date = ?, expiry_date = ?, payment_term_days = ?, validity_days = ?, notes = ? WHERE id = ?`,
@@ -331,18 +347,33 @@ export function resume(id: number, actor: Actor, today = todayISO()) {
   logActivity(actor, 'resumed', 'subscription', id, `Resumed ${sub.number}`);
 }
 
-/** Extends the term. Without an explicit date it adds the length of the original term again. */
+const MAX_RENEWAL_YEARS = 10;
+
+/** The expiry a plain renewal gives: the original term again, counted from the later of expiry and today. */
+export function defaultRenewalDate(sub: Pick<SubscriptionEntity, 'start_date' | 'expiry_date' | 'term_days'>, today: string): string | null {
+  if (!sub.expiry_date) return null;
+  const term = sub.term_days ?? Math.max(daysBetween(sub.start_date, sub.expiry_date), 1);
+  return addDays(sub.expiry_date > today ? sub.expiry_date : today, term);
+}
+
+/**
+ * Extends the term. The original length is remembered at the first renewal, because the start date
+ * and expiry drift apart after that. Periods after a lapsed expiry were never in force, so billing
+ * restarts from today rather than back-billing them.
+ */
 export function renew(id: number, actor: Actor, expiryDate?: string, today = todayISO()) {
   const sub = getSubscriptionEntity(id);
   const plan = getPlan(sub.plan_id);
   if (sub.status !== 'active') throw conflict('Only an active subscription can be renewed');
   if (!plan.renewable) throw conflict(`${plan.name} does not allow renewal`);
   if (!sub.expiry_date) throw conflict(`${sub.number} has no expiry date, so it keeps billing without renewal`);
-  const term = daysBetween(sub.start_date, sub.expiry_date);
-  const base = sub.expiry_date > today ? sub.expiry_date : today;
-  const next = expiryDate ?? addDays(base, Math.max(term, 1));
-  if (next <= sub.expiry_date) throw new HttpError(422, 'The new expiry must be after the current one');
-  db().prepare('UPDATE subscriptions SET expiry_date = ? WHERE id = ?').run(next, id);
+  const term = sub.term_days ?? Math.max(daysBetween(sub.start_date, sub.expiry_date), 1);
+  const next = expiryDate ?? defaultRenewalDate(sub, today)!;
+  if (next <= sub.expiry_date || next <= today) throw new HttpError(422, 'The new expiry must be after the current one and in the future');
+  if (next > addDays(today, MAX_RENEWAL_YEARS * 366)) throw new HttpError(422, `A renewal can run for at most ${MAX_RENEWAL_YEARS} years`);
+  const lapsed = sub.expiry_date < today && sub.next_invoice_date !== null && sub.next_invoice_date >= sub.expiry_date && sub.next_invoice_date < today;
+  const nextInvoice = lapsed ? firstBillingDateOnOrAfter(sub.start_date, plan.billing_period, today) : sub.next_invoice_date;
+  db().prepare('UPDATE subscriptions SET expiry_date = ?, term_days = ?, next_invoice_date = ? WHERE id = ?').run(next, term, nextInvoice, id);
   logActivity(actor, 'renewed', 'subscription', id, `Renewed ${sub.number} until ${next}`);
   return next;
 }
@@ -351,7 +382,7 @@ export const SUB_ROW_SELECT = `
   SELECT s.id, s.number, s.customer_id AS customerId, c.name AS customerName, c.company,
     s.plan_id AS planId, pl.name AS planName, v.value AS variantLabel, pl.billing_period AS billingPeriod,
     s.start_date AS startDate, s.expiry_date AS expiryDate, s.next_invoice_date AS nextInvoiceDate,
-    s.status, s.paused_at IS NOT NULL AS paused, s.recurring_amount AS recurringAmount,
+    s.status, s.paused_at IS NOT NULL AS paused, pl.pausable, s.recurring_amount AS recurringAmount,
     s.quote_valid_until AS quoteValidUntil,
     EXISTS (SELECT 1 FROM invoices i WHERE i.subscription_id = s.id AND i.status = 'confirmed' AND i.due_date < @today) AS overdue
   FROM subscriptions s
@@ -360,14 +391,15 @@ export const SUB_ROW_SELECT = `
   LEFT JOIN subscription_lines sl ON sl.subscription_id = s.id AND sl.is_plan_line = 1
   LEFT JOIN product_variants v ON v.id = sl.variant_id`;
 
-type RawRow = Omit<SubscriptionRow, 'paused' | 'overdue' | 'quoteExpired'> & { paused: number; overdue: number; quoteValidUntil: string | null };
+type RawRow = Omit<SubscriptionRow, 'paused' | 'pausable' | 'overdue' | 'quoteExpired'> & { paused: number; pausable: number; overdue: number; quoteValidUntil: string | null };
 
 export function mapSubRow(row: RawRow, today: string): SubscriptionRow {
   const { quoteValidUntil, ...rest } = row;
-  const billable = row.status === 'active' && !row.paused && (!row.expiryDate || (row.nextInvoiceDate ?? '') <= row.expiryDate);
+  const billable = row.status === 'active' && !row.paused && isBillableDate(row.nextInvoiceDate ?? '', row.startDate, row.expiryDate, row.billingPeriod);
   return {
     ...rest,
     paused: Boolean(row.paused),
+    pausable: Boolean(row.pausable),
     overdue: Boolean(row.overdue),
     nextInvoiceDate: billable ? row.nextInvoiceDate : null,
     quoteExpired: row.status === 'quotation' && Boolean(quoteValidUntil && quoteValidUntil < today),
@@ -393,7 +425,8 @@ export function getSubscriptionDetail(id: number, today = todayISO()): Subscript
   const sub = getSubscriptionEntity(id);
   const plan = getPlan(sub.plan_id);
   const entities = loadLines(id);
-  const priced = priceLines(entities.map(toPricingLine), loadTaxes(), loadDiscounts(), row.nextInvoiceDate ?? today);
+  const { tax_id: buyerGstin } = db().prepare('SELECT tax_id FROM customers WHERE id = ?').get(sub.customer_id) as { tax_id: string };
+  const priced = priceLines(entities.map(toPricingLine), taxesForCustomer(loadTaxes(), buyerGstin), loadDiscounts(), row.nextInvoiceDate ?? today);
   const lines = entities.map((l, i): SubscriptionLine => {
     const p = priced.lines[i];
     return {
@@ -434,6 +467,7 @@ export function getSubscriptionDetail(id: number, today = todayISO()): Subscript
     paymentTermDays: sub.payment_term_days,
     validityDays: sub.validity_days,
     quoteValidUntil: sub.quote_valid_until,
+    defaultRenewalDate: defaultRenewalDate(sub, today),
     notes: sub.notes,
     closedReason: sub.closed_reason,
     activatedAt: sub.activated_at,

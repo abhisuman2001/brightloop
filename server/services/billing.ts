@@ -1,11 +1,11 @@
-import { addDays, nextBillingDate, todayISO, type BillingPeriod } from '../../shared/dates';
+import { addDays, isBillableDate, nextBillingDate, todayISO, type BillingPeriod } from '../../shared/dates';
 import { priceLines, type PricingTax } from '../../shared/pricing';
 import type { BillingRunResult } from '../../shared/types';
 import { db, nextNumber } from '../db';
 import { HttpError, conflict, money, notFound } from '../http';
 import { logActivity, SYSTEM_ACTOR, type Actor } from './activity';
 import { appUrl, button, emailDeliveryConfigured, escapeHtml, layout, sendEmail } from './email';
-import { getPlan, getSubscriptionEntity, loadDiscounts, loadLines, loadTaxes, refreshAmounts, repriceAll, toPricingLine, transition, variantLabel, type SubscriptionEntity } from './subscriptions';
+import { BILLABLE_SQL, getPlan, getSubscriptionEntity, loadDiscounts, loadLines, loadTaxes, refreshAmounts, repriceAll, taxesForCustomer, toPricingLine, transition, variantLabel, type SubscriptionEntity } from './subscriptions';
 
 const MAX_CATCH_UP_PERIODS = 1000;
 
@@ -18,6 +18,7 @@ interface InvoiceEntity {
   customer_email: string;
   period_start: string;
   period_end: string;
+  issue_date: string;
   due_date: string;
   status: 'draft' | 'confirmed' | 'paid' | 'cancelled';
   total: number;
@@ -42,7 +43,7 @@ function createInvoiceForPeriod(sub: SubscriptionEntity, period: BillingPeriod, 
   const entities = loadLines(sub.id);
   if (entities.length === 0) throw new Error('Subscription has no lines');
   // Discounts are re-read for every invoice so a usage limit is honoured mid-run.
-  const priced = priceLines(entities.map(toPricingLine), taxes, loadDiscounts(), periodStart);
+  const priced = priceLines(entities.map(toPricingLine), taxesForCustomer(taxes, customer.tax_id), loadDiscounts(), periodStart);
   const nextStart = nextBillingDate(sub.start_date, period, periodStart);
   let periodEnd = addDays(nextStart, -1);
   if (sub.expiry_date && periodEnd > sub.expiry_date) periodEnd = sub.expiry_date;
@@ -50,8 +51,8 @@ function createInvoiceForPeriod(sub: SubscriptionEntity, period: BillingPeriod, 
   const { lastInsertRowid } = db()
     .prepare(
       `INSERT INTO invoices (number, subscription_id, customer_id, customer_name, customer_company, customer_email, customer_address, customer_tax_id,
-         period_start, period_end, issue_date, due_date, subtotal, discount_total, tax_total, total, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         period_start, period_end, issue_date, due_date, subtotal, discount_total, tax_total, tax_breakdown_json, total, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       number,
@@ -69,17 +70,18 @@ function createInvoiceForPeriod(sub: SubscriptionEntity, period: BillingPeriod, 
       priced.subtotal,
       priced.discountTotal,
       priced.taxTotal,
+      JSON.stringify(priced.taxBreakdown),
       priced.total,
       `${today}T00:00:00.000Z`,
     );
   const invoiceId = Number(lastInsertRowid);
   const insertLine = db().prepare(
-    `INSERT INTO invoice_lines (invoice_id, product_id, product_name, variant_label, quantity, unit_price, variant_extra, discount_amount, discount_name, tax_amount, tax_label, line_total)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO invoice_lines (invoice_id, product_id, product_name, hsn_code, variant_label, quantity, unit_price, variant_extra, discount_amount, discount_name, tax_amount, tax_label, line_total)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   entities.forEach((line, i) => {
     const p = priced.lines[i];
-    insertLine.run(invoiceId, line.product_id, line.product_name, variantLabel(line), line.quantity, line.unit_price, line.variant_extra, p.discount, p.discountName, p.tax, p.taxLabel, p.total);
+    insertLine.run(invoiceId, line.product_id, line.product_name, line.product_hsn, variantLabel(line), line.quantity, line.unit_price, line.variant_extra, p.discount, p.discountName, p.tax, p.taxLabel, p.total);
   });
   for (const discountId of priced.appliedDiscountIds) {
     db().prepare('INSERT INTO invoice_discounts (invoice_id, discount_id) VALUES (?, ?)').run(invoiceId, discountId);
@@ -110,7 +112,7 @@ export function billSubscription(subscriptionId: number, today: string, taxes: P
     const exists = periodExists();
     let cursor = sub.next_invoice_date;
     let guard = 0;
-    while (cursor <= today && (!sub.expiry_date || cursor <= sub.expiry_date)) {
+    while (cursor <= today && isBillableDate(cursor, sub.start_date, sub.expiry_date, period)) {
       if (++guard > MAX_CATCH_UP_PERIODS) throw new Error(`More than ${MAX_CATCH_UP_PERIODS} periods overdue for billing`);
       if (exists.get(sub.id, cursor)) {
         outcome.skipped++;
@@ -138,7 +140,7 @@ export function billNextPeriod(subscriptionId: number, actor: Actor, today = tod
     const exists = periodExists();
     let cursor = sub.next_invoice_date ?? sub.start_date;
     while (exists.get(sub.id, cursor)) cursor = nextBillingDate(sub.start_date, period, cursor);
-    if (sub.expiry_date && cursor > sub.expiry_date) {
+    if (!isBillableDate(cursor, sub.start_date, sub.expiry_date, period)) {
       throw conflict(`Every period up to the expiry date (${sub.expiry_date}) has been invoiced`);
     }
     const { invoiceId } = createInvoiceForPeriod(sub, period, cursor, today, loadTaxes());
@@ -173,10 +175,10 @@ export function runBilling(options: RunOptions = {}): BillingRunResult {
   const taxes = loadTaxes();
   const due = db()
     .prepare(
-      `SELECT id, number FROM subscriptions
-       WHERE status = 'active' AND paused_at IS NULL AND next_invoice_date <= ?
-         AND (expiry_date IS NULL OR next_invoice_date <= expiry_date)
-       ORDER BY id`,
+      `SELECT s.id, s.number FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+       WHERE s.status = 'active' AND s.paused_at IS NULL AND s.next_invoice_date <= ?
+         AND ${BILLABLE_SQL}
+       ORDER BY s.id`,
     )
     .all(today) as Array<{ id: number; number: string }>;
   let created = 0;
@@ -213,7 +215,7 @@ export function runBilling(options: RunOptions = {}): BillingRunResult {
     )
     .run(today, created, skipped, errors.length, totalAmount, ending.length, activated, JSON.stringify(errors), trigger, new Date().toISOString());
   if (!options.light) {
-    logActivity(actor, 'billing_run', 'billing', Number(lastInsertRowid), `Billing run created ${created} invoices worth $${money(totalAmount)}${errors.length ? `, ${errors.length} failed` : ''}`);
+    logActivity(actor, 'billing_run', 'billing', Number(lastInsertRowid), `Billing run created ${created} invoices worth ₹${money(totalAmount)}${errors.length ? `, ${errors.length} failed` : ''}`);
   }
   return {
     id: Number(lastInsertRowid),
@@ -281,7 +283,7 @@ export async function sendInvoice(id: number, actor: Actor) {
     html: layout(
       `Invoice ${invoice.number}`,
       `<p style="font-size:14px">Hello ${escapeHtml(invoice.customer_name)},</p>
-       <p style="font-size:14px">Your invoice for ${invoice.period_start} to ${invoice.period_end} is ready. The total is <b>$${money(invoice.total)}</b>, due on <b>${invoice.due_date}</b>.</p>
+       <p style="font-size:14px">Your invoice for ${invoice.period_start} to ${invoice.period_end} is ready. The total is <b>₹${money(invoice.total)}</b>, due on <b>${invoice.due_date}</b>.</p>
        ${button(link, 'View invoice')}`,
     ),
   });
@@ -307,9 +309,12 @@ export function recordPayment(input: PaymentInput, actor: Actor, today = todayIS
     if (invoice.status === 'paid') throw conflict(`${invoice.number} is already paid in full`);
     const balance = invoice.total - invoice.amount_paid;
     if (input.amount > balance) {
-      throw new HttpError(422, `That is more than the $${money(balance)} still owed on ${invoice.number}`, { amount: `Balance is $${money(balance)}` });
+      throw new HttpError(422, `That is more than the ₹${money(balance)} still owed on ${invoice.number}`, { amount: `Balance is ₹${money(balance)}` });
     }
     if (input.paymentDate > today) throw new HttpError(422, 'Payment date cannot be in the future', { paymentDate: 'Cannot be in the future' });
+    if (input.paymentDate < invoice.issue_date) {
+      throw new HttpError(422, `Payment date cannot be before ${invoice.number} was issued on ${invoice.issue_date}`, { paymentDate: 'Before the invoice was issued' });
+    }
     const { lastInsertRowid } = db()
       .prepare('INSERT INTO payments (invoice_id, method, amount, payment_date, note, recorded_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(input.invoiceId, input.method, input.amount, input.paymentDate, input.note, actor.id, new Date().toISOString());
@@ -317,7 +322,7 @@ export function recordPayment(input: PaymentInput, actor: Actor, today = todayIS
     db()
       .prepare('UPDATE invoices SET amount_paid = ?, status = ? WHERE id = ?')
       .run(paid, paid >= invoice.total ? 'paid' : 'confirmed', input.invoiceId);
-    if (!silent) logActivity(actor, 'payment', 'invoice', input.invoiceId, `Recorded $${money(input.amount)} against ${invoice.number}`);
+    if (!silent) logActivity(actor, 'payment', 'invoice', input.invoiceId, `Recorded ₹${money(input.amount)} against ${invoice.number}`);
     return Number(lastInsertRowid);
   })();
 }
@@ -332,6 +337,6 @@ export function voidPayment(id: number, actor: Actor) {
     const invoice = getInvoice(payment.invoice_id);
     db().prepare('UPDATE payments SET voided_at = ? WHERE id = ?').run(new Date().toISOString(), id);
     db().prepare(`UPDATE invoices SET amount_paid = amount_paid - ?, status = 'confirmed' WHERE id = ?`).run(payment.amount, payment.invoice_id);
-    logActivity(actor, 'payment_void', 'invoice', payment.invoice_id, `Voided $${money(payment.amount)} on ${invoice.number}`);
+    logActivity(actor, 'payment_void', 'invoice', payment.invoice_id, `Voided ₹${money(payment.amount)} on ${invoice.number}`);
   })();
 }

@@ -38,7 +38,8 @@ interface Mail {
 export async function sendEmail(mail: Mail): Promise<'sent' | 'logged' | 'failed'> {
   let status: 'sent' | 'logged' | 'failed' = 'logged';
   let error: string | null = null;
-  if (smtpUrl()) {
+  // .example is reserved and can never be delivered, which covers all the seeded demo customers.
+  if (smtpUrl() && !/\.example$/i.test(mail.to)) {
     try {
       transport ??= nodemailer.createTransport(smtpUrl());
       await transport.sendMail({
@@ -58,6 +59,7 @@ export async function sendEmail(mail: Mail): Promise<'sent' | 'logged' | 'failed
   }
   db()
     .prepare('INSERT INTO email_log (recipient, subject, status, error, link, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(mail.to, mail.subject, status, error, mail.link ?? null, new Date().toISOString());
+    // Once mail really goes out, a live sign-in link must not also sit in a log the admin can read.
+    .run(mail.to, mail.subject, status, error, status === 'sent' ? null : (mail.link ?? null), new Date().toISOString());
   return status;
 }
