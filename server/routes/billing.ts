@@ -1,13 +1,16 @@
 import { Router, type Request } from 'express';
 import { todayISO } from '../../shared/dates';
-import { paymentSchema } from '../../shared/schemas';
+import { paymentSchema, reconcileApplySchema, reconcilePreviewSchema } from '../../shared/schemas';
 import type { BillingRunResult, BillingStatus, InvoiceDetail, InvoiceLine, InvoiceList, InvoiceRow, InvoiceStatus, Payment, PaymentList } from '../../shared/types';
 import { requireAdmin, requireStaff, user } from '../auth';
 import { db } from '../db';
 import { idParam, isoDateParam, likePattern, money, notFound, paging, parse, str, toCsv } from '../http';
 import type { Actor } from '../services/activity';
 import { cancelInvoice, confirmAllDrafts, confirmInvoice, recordPayment, runBilling, sendInvoice, voidPayment } from '../services/billing';
-import { INVOICE_ROW_SELECT, mapInvoiceRow } from '../services/subscriptions';
+import { sellerInfo } from '../services/company';
+import { applyMatches, matchStatement, sampleStatement } from '../services/reconcile';
+import { remindInvoice } from '../services/reminders';
+import { BILLABLE_SQL, INVOICE_ROW_SELECT, mapInvoiceRow } from '../services/subscriptions';
 
 export const billingRouter = Router();
 billingRouter.use(requireStaff);
@@ -30,18 +33,19 @@ export function getInvoiceDetail(id: number, customerId?: number): InvoiceDetail
   const extra = db()
     .prepare(
       `SELECT customer_email AS customerEmail, customer_address AS customerAddress, customer_tax_id AS customerTaxId,
-         subtotal, discount_total AS discountTotal, tax_total AS taxTotal FROM invoices WHERE id = ?`,
+         subtotal, discount_total AS discountTotal, tax_total AS taxTotal, tax_breakdown_json AS taxBreakdownJson, last_reminder_at AS lastReminderAt FROM invoices WHERE id = ?`,
     )
-    .get(id) as Pick<InvoiceDetail, 'customerEmail' | 'customerAddress' | 'customerTaxId' | 'subtotal' | 'discountTotal' | 'taxTotal'>;
+    .get(id) as Pick<InvoiceDetail, 'customerEmail' | 'customerAddress' | 'customerTaxId' | 'subtotal' | 'discountTotal' | 'taxTotal' | 'lastReminderAt'> & { taxBreakdownJson: string };
   const lines = db()
     .prepare(
-      `SELECT id, product_name AS productName, variant_label AS variantLabel, quantity, unit_price AS unitPrice, variant_extra AS variantExtra,
+      `SELECT id, product_name AS productName, hsn_code AS hsnCode, variant_label AS variantLabel, quantity, unit_price AS unitPrice, variant_extra AS variantExtra,
          discount_amount AS discountAmount, discount_name AS discountName, tax_amount AS taxAmount, tax_label AS taxLabel, line_total AS lineTotal
        FROM invoice_lines WHERE invoice_id = ? ORDER BY id`,
     )
     .all(id) as InvoiceLine[];
   const payments = db().prepare(`${PAYMENT_SELECT} WHERE p.invoice_id = ? ORDER BY p.payment_date DESC, p.id DESC`).all(id) as Payment[];
-  return { ...mapInvoiceRow(raw), ...extra, lines, payments };
+  const { taxBreakdownJson, ...rest } = extra;
+  return { ...mapInvoiceRow(raw), ...rest, taxBreakdown: JSON.parse(taxBreakdownJson), seller: sellerInfo(), lines, payments };
 }
 
 function invoiceFilter(req: Request, today: string) {
@@ -80,12 +84,14 @@ billingRouter.get('/invoices', (req, res) => {
   const today = todayISO();
   const { page, pageSize, offset } = paging(req);
   const { where, baseWhere, params } = invoiceFilter(req, today);
+  // The money total leaves out cancelled invoices unless they are the list being looked at.
+  const counted = params.status === 'cancelled' ? 'i.total' : `CASE WHEN i.status = 'cancelled' THEN 0 ELSE i.total END`;
   const rows = db()
     .prepare(`${INVOICE_ROW_SELECT} ${where} ORDER BY i.id DESC LIMIT @limit OFFSET @offset`)
     .all({ ...params, limit: pageSize, offset }) as RawInvoice[];
   const summary = db()
     .prepare(
-      `SELECT COUNT(*) AS n, COALESCE(SUM(i.total), 0) AS total,
+      `SELECT COUNT(*) AS n, COALESCE(SUM(${counted}), 0) AS total,
          COALESCE(SUM(CASE WHEN i.status = 'confirmed' THEN i.total - i.amount_paid ELSE 0 END), 0) AS balance ${FROM_INVOICES} ${where}`,
     )
     .get(params) as { n: number; total: number; balance: number };
@@ -151,6 +157,12 @@ billingRouter.post('/invoices/:id/send', async (req, res) => {
   res.json({ ...getInvoiceDetail(id), emailStatus: result.status });
 });
 
+billingRouter.post('/invoices/:id/remind', async (req, res) => {
+  const id = idParam(req);
+  const status = await remindInvoice(id, actorOf(req));
+  res.json({ status });
+});
+
 // Billing runs
 
 const mapRun = (r: Record<string, never>): BillingRunResult => ({
@@ -171,8 +183,8 @@ billingRouter.get('/billing/status', (_req, res) => {
   const today = todayISO();
   const { dueNow } = db()
     .prepare(
-      `SELECT COUNT(*) AS dueNow FROM subscriptions WHERE status = 'active' AND paused_at IS NULL AND next_invoice_date <= ?
-       AND (expiry_date IS NULL OR next_invoice_date <= expiry_date)`,
+      `SELECT COUNT(*) AS dueNow FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+       WHERE s.status = 'active' AND s.paused_at IS NULL AND s.next_invoice_date <= ? AND ${BILLABLE_SQL}`,
     )
     .get(today) as { dueNow: number };
   const { draftInvoices } = db().prepare(`SELECT COUNT(*) AS draftInvoices FROM invoices WHERE status = 'draft'`).get() as { draftInvoices: number };
@@ -187,9 +199,7 @@ billingRouter.post('/billing/run', (req, res) => {
 
 // Payments
 
-billingRouter.get('/payments', (req, res) => {
-  const today = todayISO();
-  const { page, pageSize, offset } = paging(req);
+function paymentFilter(req: Request) {
   const clauses: string[] = [];
   const params: Record<string, string | number> = {};
   const q = str(req.query.q);
@@ -202,7 +212,13 @@ billingRouter.get('/payments', (req, res) => {
     clauses.push('p.method = @method');
     params.method = method;
   }
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  return { where: clauses.length ? `WHERE ${clauses.join(' AND ')}` : '', params };
+}
+
+billingRouter.get('/payments', (req, res) => {
+  const today = todayISO();
+  const { page, pageSize, offset } = paging(req);
+  const { where, params } = paymentFilter(req);
   const rows = db()
     .prepare(`${PAYMENT_SELECT} ${where} ORDER BY p.payment_date DESC, p.id DESC LIMIT @limit OFFSET @offset`)
     .all({ ...params, limit: pageSize, offset }) as Payment[];
@@ -219,8 +235,9 @@ billingRouter.get('/payments', (req, res) => {
   res.json(body);
 });
 
-billingRouter.get('/payments/export.csv', (_req, res) => {
-  const rows = db().prepare(`${PAYMENT_SELECT} ORDER BY p.payment_date DESC, p.id DESC`).all() as Payment[];
+billingRouter.get('/payments/export.csv', (req, res) => {
+  const { where, params } = paymentFilter(req);
+  const rows = db().prepare(`${PAYMENT_SELECT} ${where} ORDER BY p.payment_date DESC, p.id DESC`).all(params) as Payment[];
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="payments-${todayISO()}.csv"`);
   res.send(
@@ -235,6 +252,22 @@ billingRouter.post('/payments', (req, res) => {
   const input = parse(paymentSchema, req.body);
   recordPayment(input, actorOf(req));
   res.status(201).json(getInvoiceDetail(input.invoiceId));
+});
+
+// Bank statement matching
+
+billingRouter.post('/payments/reconcile/preview', (req, res) => {
+  res.json(matchStatement(parse(reconcilePreviewSchema, req.body).csv));
+});
+
+billingRouter.post('/payments/reconcile/apply', (req, res) => {
+  res.json(applyMatches(parse(reconcileApplySchema, req.body).items, actorOf(req)));
+});
+
+billingRouter.get('/payments/reconcile/sample.csv', (_req, res) => {
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="sample-bank-statement.csv"');
+  res.send(sampleStatement());
 });
 
 billingRouter.post('/payments/:id/void', requireAdmin, (req, res) => {

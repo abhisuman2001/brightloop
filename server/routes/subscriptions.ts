@@ -1,5 +1,5 @@
 import { Router, type Request } from 'express';
-import { todayISO } from '../../shared/dates';
+import { addDays, todayISO } from '../../shared/dates';
 import { renewSchema, subscriptionSchema, transitionSchema } from '../../shared/schemas';
 import type { SubscriptionList, SubscriptionStatus } from '../../shared/types';
 import { requireStaff, user } from '../auth';
@@ -43,6 +43,11 @@ function buildFilter(req: Request, today: string) {
     clauses.push(`EXISTS (SELECT 1 FROM invoices i WHERE i.subscription_id = s.id AND i.status = 'confirmed' AND i.due_date < @today)`);
   }
   if (req.query.paused === '1') clauses.push('s.paused_at IS NOT NULL');
+  const expiring = Number(req.query.expiring);
+  if (expiring > 0 && expiring <= 365) {
+    clauses.push(`s.status = 'active' AND s.expiry_date BETWEEN @today AND @expiringBy`);
+    params.expiringBy = addDays(today, expiring);
+  }
   const base = clauses.join(' AND ');
   const status = str(req.query.status);
   const withStatus = status ? [base, 's.status = @status'].filter(Boolean).join(' AND ') : base;
@@ -69,8 +74,10 @@ subscriptionsRouter.get('/', (req, res) => {
   const { base, where, params } = buildFilter(req, today);
   const sortKey = SORTS[str(req.query.sort) ?? ''] ?? 's.id';
   const dir = req.query.dir === 'asc' ? 'ASC' : 'DESC';
+  const within = SORTS[str(req.query.then) ?? ''];
+  const thenBy = within ? `${within} ${req.query.thenDir === 'asc' ? 'ASC' : 'DESC'}, ` : '';
   const rows = db()
-    .prepare(`${SUB_ROW_SELECT} ${whereSql(where)} ORDER BY ${sortKey} ${dir}, s.id DESC LIMIT @limit OFFSET @offset`)
+    .prepare(`${SUB_ROW_SELECT} ${whereSql(where)} ORDER BY ${sortKey} ${dir}, ${thenBy}s.id DESC LIMIT @limit OFFSET @offset`)
     .all({ ...params, limit: pageSize, offset }) as Parameters<typeof mapSubRow>[0][];
   const summary = db()
     .prepare(
@@ -169,7 +176,7 @@ subscriptionsRouter.post('/:id/email', async (req, res) => {
     html: layout(
       `${detail.status === 'quotation' ? 'Your quotation' : 'Your subscription'} ${detail.number}`,
       `<p style="font-size:14px">Hello ${escapeHtml(detail.customerName)},</p>
-       <p style="font-size:14px">${escapeHtml(detail.planName)}: <b>$${money(detail.totals.total)}</b> per ${detail.billingPeriod.replace('ly', '').replace('dai', 'day')} including tax.${detail.quoteValidUntil && detail.status === 'quotation' ? ` This offer is valid until ${detail.quoteValidUntil}.` : ''}</p>
+       <p style="font-size:14px">${escapeHtml(detail.planName)}: <b>₹${money(detail.totals.total)}</b> per ${detail.billingPeriod.replace('ly', '').replace('dai', 'day')} including tax.${detail.quoteValidUntil && detail.status === 'quotation' ? ` This offer is valid until ${detail.quoteValidUntil}.` : ''}</p>
        ${button(link, 'View details')}`,
     ),
   });
