@@ -24,6 +24,21 @@ export function useDebounced<T>(value: T, ms = 250): T {
   return debounced;
 }
 
+/** A debounced search box tied to `q` in the URL, in both directions, so following a link clears an old search. */
+export function useSearchFilter(urlValue: string, write: (q: string) => void) {
+  const [text, setText] = useState(urlValue);
+  const q = useDebounced(text);
+  useEffect(() => {
+    if (urlValue !== q) setText(urlValue);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlValue]);
+  useEffect(() => {
+    if (q !== urlValue) write(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+  return { text, setText, q };
+}
+
 /** Filters live in the URL, so a filtered view can be refreshed, bookmarked and linked to. */
 export function useUrlFilters<K extends string>() {
   const [params, setParams] = useSearchParams();

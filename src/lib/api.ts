@@ -25,7 +25,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (res.status === 204) return undefined as T;
   const data = await res.json().catch(() => null);
   if (!res.ok) {
-    if (res.status === 401 && !path.startsWith('/auth/')) queryClient.setQueryData(['me'], null);
+    if (res.status === 401 && !path.startsWith('/auth/')) {
+      queryClient.removeQueries({ predicate: (q) => q.queryKey[0] !== 'me' });
+      queryClient.setQueryData(['me'], null);
+    }
     throw new ApiError(res.status, data?.error ?? 'Something went wrong. Please try again.', data?.fields);
   }
   return data as T;

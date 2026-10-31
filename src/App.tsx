@@ -1,11 +1,12 @@
-import { lazy, Suspense, type ReactNode } from 'react';
+import { Component, lazy, Suspense, type ReactNode } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import type { Role } from '../shared/types';
 import { AppLayout, PageFallback } from './components/Layout';
-import { ErrorState } from './components/ui';
+import { Button, EmptyState, ErrorState } from './components/ui';
 import { useMe } from './lib/hooks';
 import { ForgotPassword, Login, ResetPassword, Signup } from './pages/Auth';
 
+const Landing = lazy(() => import('./pages/Landing'));
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Subscriptions = lazy(() => import('./pages/Subscriptions'));
 const Plans = lazy(() => import('./pages/Plans'));
@@ -32,16 +33,52 @@ function Guard({ roles, children }: { roles: Role[]; children: ReactNode }) {
   const location = useLocation();
   if (isLoading) return <PageFallback />;
   if (isError) return <ErrorState error={error} onRetry={() => refetch()} />;
-  if (!me) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+  if (!me) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
   if (!roles.includes(me.role)) return <Navigate to={homeFor(me.role)} replace />;
   return children;
 }
 
 function GuestOnly({ children }: { children: ReactNode }) {
   const { data: me, isLoading } = useMe();
+  const from = (useLocation().state as { from?: string } | null)?.from;
   if (isLoading) return <PageFallback />;
-  if (me) return <Navigate to={homeFor(me.role)} replace />;
+  // A link opened while signed out carries on to where it was going. Guard still checks the role.
+  if (me) return <Navigate to={from ?? homeFor(me.role)} replace />;
   return children;
+}
+
+/** A rendering bug shows a way out instead of a blank page, and clears when the person navigates away. */
+class Boundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error(error);
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return <EmptyState title="This page ran into a problem" description="Your data is safe. Reload to try again, or go back to the start." action={<Button onClick={() => window.location.assign('/')}>Back to the start</Button>} />;
+  }
+}
+
+function RouteBoundary({ children }: { children: ReactNode }) {
+  return <Boundary key={useLocation().pathname}>{children}</Boundary>;
+}
+
+/** The root is the landing page for visitors. Everyone signed in goes on to the app, and any deeper path still asks for a login. */
+function Root() {
+  const { data: me, isLoading, isError } = useMe();
+  const { pathname } = useLocation();
+  if (pathname === '/' && !isLoading && !isError && !me) return <Landing />;
+  return (
+    <Guard roles={TEAM}>
+      <AppLayout />
+    </Guard>
+  );
 }
 
 const TEAM: Role[] = ['admin', 'staff'];
@@ -50,7 +87,8 @@ const EVERYONE: Role[] = ['admin', 'staff', 'customer'];
 export default function App() {
   return (
     <BrowserRouter>
-      <Suspense fallback={<PageFallback />}>
+      <RouteBoundary>
+        <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/login" element={<GuestOnly><Login /></GuestOnly>} />
           <Route path="/signup" element={<GuestOnly><Signup /></GuestOnly>} />
@@ -64,7 +102,7 @@ export default function App() {
             <Route path="plans" element={<PortalPlansPage />} />
             <Route path="account" element={<PortalAccountPage />} />
           </Route>
-          <Route path="/" element={<Guard roles={TEAM}><AppLayout /></Guard>}>
+          <Route path="/" element={<Root />}>
             <Route index element={<Dashboard />} />
             <Route path="subscriptions" element={<Subscriptions />} />
             <Route path="plans" element={<Plans />} />
@@ -77,7 +115,8 @@ export default function App() {
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-      </Suspense>
+        </Suspense>
+      </RouteBoundary>
     </BrowserRouter>
   );
 }
