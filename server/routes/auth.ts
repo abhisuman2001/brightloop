@@ -95,21 +95,22 @@ authRouter.post('/forgot-password', async (req, res) => {
 function consumeToken(req: Request) {
   const { token, password } = parse(resetSchema, req.body);
   const row = db()
-    .prepare('SELECT user_id, expires_at, used_at FROM password_tokens WHERE token_hash = ?')
-    .get(sha256(token)) as { user_id: number; expires_at: string; used_at: string | null } | undefined;
+    .prepare('SELECT user_id, expires_at, used_at, link_customer_id FROM password_tokens WHERE token_hash = ?')
+    .get(sha256(token)) as { user_id: number; expires_at: string; used_at: string | null; link_customer_id: number | null } | undefined;
   if (!row || row.used_at || row.expires_at < new Date().toISOString()) {
     throw new HttpError(400, 'This link is invalid or has expired. Request a new one.');
   }
-  return { tokenHash: sha256(token), userId: row.user_id, password };
+  return { tokenHash: sha256(token), userId: row.user_id, linkCustomerId: row.link_customer_id, password };
 }
 
 authRouter.post('/reset-password', async (req, res) => {
-  const { tokenHash, userId, password } = consumeToken(req);
+  const { tokenHash, userId, linkCustomerId, password } = consumeToken(req);
   const passwordHash = await hashPassword(password);
   db().transaction(() => {
     const claimed = db().prepare('UPDATE password_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL').run(new Date().toISOString(), tokenHash);
     if (claimed.changes === 0) throw conflict('This link has already been used');
     db().prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, userId);
+    if (linkCustomerId) db().prepare('UPDATE users SET customer_id = ? WHERE id = ?').run(linkCustomerId, userId);
     // Anyone who was signed in with the old password is signed out.
     db().prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
   })();

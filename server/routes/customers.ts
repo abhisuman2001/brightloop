@@ -79,13 +79,19 @@ customersRouter.post('/:id/invite', async (req, res) => {
   const id = idParam(req);
   const customer = db().prepare('SELECT * FROM customers WHERE id = ?').get(id) as { name: string; email: string } | undefined;
   if (!customer) throw notFound('Customer');
-  if (db().prepare('SELECT 1 FROM users WHERE email = ?').get(customer.email)) {
+  const existing = db().prepare('SELECT id, role, customer_id FROM users WHERE email = ?').get(customer.email) as { id: number; role: string; customer_id: number | null } | undefined;
+  if (existing && (existing.role !== 'customer' || existing.customer_id === id)) {
     throw conflict('An account with this email already exists');
   }
-  const { lastInsertRowid } = db()
-    .prepare(`INSERT INTO users (email, name, role, customer_id, created_at) VALUES (?, ?, 'customer', ?, ?)`)
-    .run(customer.email, customer.name, id, new Date().toISOString());
-  const link = `${appUrl()}/reset-password?token=${createPasswordToken(Number(lastInsertRowid), 72)}&invite=1`;
+  // Someone who signed up with this address gets a link that attaches this record once they open it.
+  const userId =
+    existing?.id ??
+    Number(
+      db()
+        .prepare(`INSERT INTO users (email, name, role, customer_id, created_at) VALUES (?, ?, 'customer', ?, ?)`)
+        .run(customer.email, customer.name, id, new Date().toISOString()).lastInsertRowid,
+    );
+  const link = `${appUrl()}/reset-password?token=${createPasswordToken(userId, 72, existing ? id : null)}&invite=1`;
   const status = await sendEmail({
     to: customer.email,
     subject: 'Your Brightloop customer portal',
