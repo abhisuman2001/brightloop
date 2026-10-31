@@ -202,5 +202,6 @@ portalRouter.post('/subscriptions/:id/cancel', (req, res) => {
 portalRouter.get('/invoices/:id', (req, res) => {
   const detail = getInvoiceDetail(idParam(req), customerIdOf(req));
   if (detail.status === 'draft') throw notFound('Invoice');
-  res.json(detail);
+  // Who recorded a payment and the team's notes on it are internal.
+  res.json({ ...detail, payments: detail.payments.map((p) => ({ ...p, note: '', recordedBy: '' })) });
 });

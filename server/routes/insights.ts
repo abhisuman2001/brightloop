@@ -145,9 +145,35 @@ function buildReport(from: string, to: string, planId: number | null): FinanceRe
       .all({ today, ...(planId ? { planId } : {}) }) as Array<Omit<InvoiceRow, 'overdue'> & { overdue: number }>
   ).map(mapInvoiceRow);
 
+  // Valued at each subscription's current amount, like the dashboard trend.
+  const rangeEnd = `${to}T23:59:59.999Z`;
+  const planOnly = planId ? { planId } : {};
+  const starting = db()
+    .prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(s.monthly_amount), 0) AS mrr FROM subscriptions s WHERE s.activated_at < @from AND (s.closed_at IS NULL OR s.closed_at >= @from) ${planClause}`)
+    .get({ from, ...planOnly }) as { n: number; mrr: number };
+  const added = db()
+    .prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(s.monthly_amount), 0) AS mrr FROM subscriptions s WHERE s.activated_at >= @from AND s.activated_at <= @rangeEnd ${planClause}`)
+    .get({ from, rangeEnd, ...planOnly }) as { n: number; mrr: number };
+  const churned = db()
+    .prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(s.monthly_amount), 0) AS mrr FROM subscriptions s WHERE s.activated_at IS NOT NULL AND s.closed_at >= @from AND s.closed_at <= @rangeEnd ${planClause}`)
+    .get({ from, rangeEnd, ...planOnly }) as { n: number; mrr: number };
+  const { customers } = db()
+    .prepare(`SELECT COUNT(DISTINCT s.customer_id) AS customers FROM subscriptions s WHERE s.status = 'active' AND s.paused_at IS NULL ${planClause}`)
+    .get(planOnly) as { customers: number };
+
   return {
     activeSubscriptions: active.n,
     mrr: active.mrr,
+    movement: {
+      startingMrr: starting.mrr,
+      newMrr: added.mrr,
+      churnedMrr: churned.mrr,
+      newSubscriptions: added.n,
+      churnedSubscriptions: churned.n,
+      churnRatePct: starting.n + added.n > 0 ? (churned.n / (starting.n + added.n)) * 100 : null,
+      revenueChurnPct: starting.mrr + added.mrr > 0 ? (churned.mrr / (starting.mrr + added.mrr)) * 100 : null,
+      averagePerCustomer: customers > 0 ? Math.round(active.mrr / customers) : 0,
+    },
     invoiced,
     collected,
     ...open,
@@ -198,10 +224,10 @@ insightsRouter.get('/search', (req, res) => {
       .all({ q: like }) as SearchResults['customers'],
     invoices: db()
       .prepare(
-        `SELECT id, number, customer_name AS customerName, status, total FROM invoices
+        `SELECT id, number, customer_name AS customerName, status, total, status = 'confirmed' AND due_date < @today AS overdue FROM invoices
          WHERE number LIKE @q ESCAPE '\\' OR customer_name LIKE @q ESCAPE '\\' OR customer_company LIKE @q ESCAPE '\\' ORDER BY id DESC LIMIT 5`,
       )
-      .all({ q: like }) as SearchResults['invoices'],
+      .all({ q: like, today: todayISO() }) as SearchResults['invoices'],
   };
   res.json(body);
 });
@@ -215,7 +241,7 @@ insightsRouter.get('/notifications', (_req, res) => {
   const failed = db().prepare('SELECT failed FROM billing_runs ORDER BY id DESC LIMIT 1').get() as { failed: number } | undefined;
   if (failed?.failed) items.push({ key: 'failed', title: 'Billing failures', detail: 'The last run could not bill these subscriptions', count: failed.failed, to: '/invoices', tone: 'rose' });
   const renewals = count(`SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'active' AND expiry_date BETWEEN ? AND ?`, today, addDays(today, 14));
-  if (renewals) items.push({ key: 'renewals', title: 'Renewals due', detail: 'Expiring in the next 14 days', count: renewals, to: '/subscriptions?status=active', tone: 'amber' });
+  if (renewals) items.push({ key: 'renewals', title: 'Renewals due', detail: 'Expiring in the next 14 days', count: renewals, to: '/subscriptions?expiring=14', tone: 'amber' });
   const quotes = count(`SELECT COUNT(*) AS n FROM subscriptions WHERE status = 'quotation' AND quote_valid_until BETWEEN ? AND ?`, today, addDays(today, 7));
   if (quotes) items.push({ key: 'quotes', title: 'Quotations expiring', detail: 'Valid for 7 days or fewer', count: quotes, to: '/subscriptions?status=quotation', tone: 'amber' });
   const drafts = count(`SELECT COUNT(*) AS n FROM invoices WHERE status = 'draft'`);

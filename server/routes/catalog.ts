@@ -1,11 +1,13 @@
 import { Router, type Request } from 'express';
 import { discountSchema, planSchema, productSchema, taxSchema, templateSchema } from '../../shared/schemas';
 import { todayISO } from '../../shared/dates';
+import { taxesForSale } from '../../shared/pricing';
 import type { Discount, Plan, Product, QuotationTemplate, TaxRule, Variant } from '../../shared/types';
 import { requireAdmin, requireStaff, user } from '../auth';
 import { db } from '../db';
-import { conflict, idParam, notFound, parse } from '../http';
+import { HttpError, conflict, idParam, notFound, parse } from '../http';
 import { logActivity, type Actor } from '../services/activity';
+import { sellerInfo } from '../services/company';
 import { repriceAll } from '../services/subscriptions';
 
 export const catalogRouter = Router();
@@ -16,7 +18,7 @@ const actorOf = (req: Request): Actor => ({ id: user(req).id, name: user(req).na
 // Products and variants
 
 function listProducts(): Product[] {
-  const products = db().prepare('SELECT id, name, type, sales_price AS salesPrice, cost_price AS costPrice, notes, active FROM products ORDER BY name').all() as Array<
+  const products = db().prepare('SELECT id, name, type, sales_price AS salesPrice, cost_price AS costPrice, notes, hsn_code AS hsnCode, active FROM products ORDER BY name').all() as Array<
     Omit<Product, 'active' | 'variants'> & { active: number }
   >;
   const variants = db()
@@ -54,8 +56,8 @@ catalogRouter.post('/products', requireAdmin, (req, res) => {
   const input = parse(productSchema, req.body);
   const id = db().transaction(() => {
     const { lastInsertRowid } = db()
-      .prepare('INSERT INTO products (name, type, sales_price, cost_price, notes, active) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(input.name, input.type, input.salesPrice, input.costPrice, input.notes, Number(input.active));
+      .prepare('INSERT INTO products (name, type, sales_price, cost_price, notes, hsn_code, active) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(input.name, input.type, input.salesPrice, input.costPrice, input.notes, input.hsnCode, Number(input.active));
     saveVariants(Number(lastInsertRowid), input.variants);
     return Number(lastInsertRowid);
   })();
@@ -68,8 +70,8 @@ catalogRouter.patch('/products/:id', requireAdmin, (req, res) => {
   const input = parse(productSchema, req.body);
   db().transaction(() => {
     const { changes } = db()
-      .prepare('UPDATE products SET name = ?, type = ?, sales_price = ?, cost_price = ?, notes = ?, active = ? WHERE id = ?')
-      .run(input.name, input.type, input.salesPrice, input.costPrice, input.notes, Number(input.active), id);
+      .prepare('UPDATE products SET name = ?, type = ?, sales_price = ?, cost_price = ?, notes = ?, hsn_code = ?, active = ? WHERE id = ?')
+      .run(input.name, input.type, input.salesPrice, input.costPrice, input.notes, input.hsnCode, Number(input.active), id);
     if (changes === 0) throw notFound('Product');
     saveVariants(id, input.variants);
   })();
@@ -147,8 +149,19 @@ function listTemplates(): QuotationTemplate[] {
 
 catalogRouter.get('/templates', (_req, res) => res.json(listTemplates()));
 
+/** A broken template would otherwise only fail later, when a rep starts a quote from it. */
+function assertTemplateUsable(t: { planId: number; planQuantity: number; lines: Array<{ productId: number }> }) {
+  const plan = db().prepare('SELECT name, min_quantity FROM plans WHERE id = ?').get(t.planId) as { name: string; min_quantity: number } | undefined;
+  if (!plan) throw new HttpError(422, 'Choose a plan', { planId: 'Choose a plan' });
+  if (t.planQuantity < plan.min_quantity) throw new HttpError(422, `${plan.name} requires a minimum quantity of ${plan.min_quantity}`, { planQuantity: `Minimum quantity is ${plan.min_quantity}` });
+  for (const line of t.lines) {
+    if (!db().prepare('SELECT 1 FROM products WHERE id = ?').get(line.productId)) throw new HttpError(422, 'A selected product no longer exists');
+  }
+}
+
 catalogRouter.post('/templates', requireAdmin, (req, res) => {
   const t = parse(templateSchema, req.body);
+  assertTemplateUsable(t);
   const { lastInsertRowid } = db()
     .prepare('INSERT INTO quotation_templates (name, plan_id, validity_days, payment_term_days, plan_quantity, plan_variant_id, lines_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(t.name, t.planId, t.validityDays, t.paymentTermDays, t.planQuantity, t.planVariantId ?? null, JSON.stringify(t.lines));
@@ -159,6 +172,7 @@ catalogRouter.post('/templates', requireAdmin, (req, res) => {
 catalogRouter.patch('/templates/:id', requireAdmin, (req, res) => {
   const id = idParam(req);
   const t = parse(templateSchema, req.body);
+  assertTemplateUsable(t);
   const { changes } = db()
     .prepare('UPDATE quotation_templates SET name = ?, plan_id = ?, validity_days = ?, payment_term_days = ?, plan_quantity = ?, plan_variant_id = ?, lines_json = ? WHERE id = ?')
     .run(t.name, t.planId, t.validityDays, t.paymentTermDays, t.planQuantity, t.planVariantId ?? null, JSON.stringify(t.lines), id);
@@ -170,16 +184,22 @@ catalogRouter.patch('/templates/:id', requireAdmin, (req, res) => {
 // Tax rules
 
 const listTaxes = () =>
-  (db().prepare('SELECT id, name, rate_bps AS rateBps, product_type AS productType, active FROM tax_rules ORDER BY name').all() as Array<Omit<TaxRule, 'active'> & { active: number }>).map((t) => ({
+  (db().prepare('SELECT id, name, rate_bps AS rateBps, product_type AS productType, supply, active FROM tax_rules ORDER BY name').all() as Array<Omit<TaxRule, 'active'> & { active: number }>).map((t) => ({
     ...t,
     active: Boolean(t.active),
   }));
 
-catalogRouter.get('/taxes', (_req, res) => res.json(listTaxes()));
+catalogRouter.get('/taxes', (req, res) => {
+  // With a customer, only the rules for a sale to them, which keeps previews equal to the real invoice.
+  const customerId = Number(req.query.customerId);
+  if (!customerId) return void res.json(listTaxes());
+  const customer = db().prepare('SELECT tax_id FROM customers WHERE id = ?').get(customerId) as { tax_id: string } | undefined;
+  res.json(taxesForSale(listTaxes(), sellerInfo().gstin, customer?.tax_id));
+});
 
 catalogRouter.post('/taxes', requireAdmin, (req, res) => {
   const t = parse(taxSchema, req.body);
-  const { lastInsertRowid } = db().prepare('INSERT INTO tax_rules (name, rate_bps, product_type, active) VALUES (?, ?, ?, ?)').run(t.name, t.rateBps, t.productType, Number(t.active));
+  const { lastInsertRowid } = db().prepare('INSERT INTO tax_rules (name, rate_bps, product_type, supply, active) VALUES (?, ?, ?, ?, ?)').run(t.name, t.rateBps, t.productType, t.supply, Number(t.active));
   logActivity(actorOf(req), 'created', 'tax', Number(lastInsertRowid), `Created tax rule ${t.name}`);
   repriceAll(todayISO());
   res.status(201).json(listTaxes().find((x) => x.id === Number(lastInsertRowid)));
@@ -188,7 +208,7 @@ catalogRouter.post('/taxes', requireAdmin, (req, res) => {
 catalogRouter.patch('/taxes/:id', requireAdmin, (req, res) => {
   const id = idParam(req);
   const t = parse(taxSchema, req.body);
-  const { changes } = db().prepare('UPDATE tax_rules SET name = ?, rate_bps = ?, product_type = ?, active = ? WHERE id = ?').run(t.name, t.rateBps, t.productType, Number(t.active), id);
+  const { changes } = db().prepare('UPDATE tax_rules SET name = ?, rate_bps = ?, product_type = ?, supply = ?, active = ? WHERE id = ?').run(t.name, t.rateBps, t.productType, t.supply, Number(t.active), id);
   if (changes === 0) throw notFound('Tax rule');
   logActivity(actorOf(req), 'updated', 'tax', id, `Updated tax rule ${t.name}`);
   repriceAll(todayISO());
