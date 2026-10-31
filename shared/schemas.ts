@@ -1,8 +1,9 @@
 import { z } from 'zod';
+import { isValidDate } from './dates';
 
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use a valid date');
+const isoDate = z.string().refine(isValidDate, 'Use a valid date');
 const optionalDate = isoDate.nullable().optional();
-const cents = z.number().int('Amount must be in whole cents').min(0, 'Cannot be negative');
+const paise = z.number().int('Amount must be in whole paise').min(0, 'Cannot be negative');
 const text = (max: number) => z.string().trim().max(max);
 
 export const PASSWORD_RULES = 'More than 8 characters, with an uppercase letter, a lowercase letter and a special character.';
@@ -54,9 +55,10 @@ export const PRODUCT_TYPES = ['software', 'addon', 'service', 'goods'] as const;
 export const productSchema = z.object({
   name: text(120).min(1, 'Name is required'),
   type: z.enum(PRODUCT_TYPES),
-  salesPrice: cents,
-  costPrice: cents,
+  salesPrice: paise,
+  costPrice: paise,
   notes: text(2000).default(''),
+  hsnCode: text(10).default(''),
   active: z.boolean().default(true),
   variants: z
     .array(
@@ -64,7 +66,7 @@ export const productSchema = z.object({
         id: z.number().int().optional(),
         attribute: text(60).min(1, 'Attribute is required'),
         value: text(60).min(1, 'Value is required'),
-        extraPrice: cents,
+        extraPrice: paise,
       }),
     )
     .default([]),
@@ -75,7 +77,7 @@ export const planSchema = z
   .object({
     name: text(120).min(1, 'Name is required'),
     productId: z.number({ error: 'Choose a product' }).int(),
-    price: cents,
+    price: paise,
     billingPeriod: z.enum(BILLING_PERIODS),
     minQuantity: z.number().int().min(1, 'Minimum quantity is at least 1'),
     startDate: optionalDate,
@@ -137,6 +139,7 @@ export const taxSchema = z.object({
   name: text(80).min(1, 'Name is required'),
   rateBps: z.number().int().min(0).max(10_000, 'Rate cannot exceed 100%'),
   productType: z.enum(PRODUCT_TYPES).nullable(),
+  supply: z.enum(['any', 'intra', 'inter']).default('any'),
   active: z.boolean().default(true),
 });
 
@@ -145,7 +148,7 @@ export const discountSchema = z
     name: text(120).min(1, 'Name is required'),
     kind: z.enum(['percent', 'fixed']),
     value: z.number().int().min(1, 'Value must be greater than zero'),
-    minPurchase: cents.default(0),
+    minPurchase: paise.default(0),
     minQuantity: z.number().int().min(0).default(0),
     startDate: optionalDate,
     endDate: optionalDate,
@@ -171,6 +174,23 @@ export const paymentSchema = z.object({
   amount: z.number().int().min(1, 'Amount must be greater than zero'),
   paymentDate: isoDate,
   note: text(500).default(''),
+});
+
+export const reconcilePreviewSchema = z.object({ csv: z.string().min(1, 'That file is empty').max(200_000, 'That file is too large. Export a shorter date range.') });
+export const reconcileApplySchema = z.object({
+  items: z
+    .array(
+      z.object({
+        invoiceId: z.number().int(),
+        amount: z.number().int().min(1),
+        paymentDate: isoDate,
+        method: z.enum(PAYMENT_METHODS),
+        reference: text(100).default(''),
+        description: text(400).default(''),
+      }),
+    )
+    .min(1, 'Choose at least one payment')
+    .max(2000),
 });
 
 export const portalAddonSchema = z.object({ productId: z.number().int(), enabled: z.boolean() });

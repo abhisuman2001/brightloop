@@ -1,4 +1,4 @@
-// All money is integer cents; percentages are basis points (1250 = 12.5%).
+// All money is integer paise; percentages are basis points (1250 = 12.5%).
 export interface PricingLine {
   key: string | number;
   productId: number;
@@ -14,13 +14,27 @@ export interface PricingTax {
   rateBps: number;
   /** null applies the rule to every product type. */
   productType: string | null;
+  /** Limits a rule to sales inside or outside the seller's state. Left out, it always applies. */
+  supply?: 'any' | 'intra' | 'inter';
+}
+
+const GSTIN = /^\d{2}[A-Z]{5}\d{4}[A-Z][A-Z\d]Z[A-Z\d]$/;
+
+/**
+ * Keeps the rules that fit this sale. The first two digits of a GSTIN are the state, so a buyer
+ * registered elsewhere is inter-state. A buyer with no GSTIN is treated as inside the seller's state.
+ */
+export function taxesForSale<T extends { supply?: 'any' | 'intra' | 'inter' }>(taxes: T[], sellerGstin: string, buyerGstin: string | null | undefined): T[] {
+  const buyer = (buyerGstin ?? '').trim().toUpperCase();
+  const interState = GSTIN.test(buyer) && GSTIN.test(sellerGstin) && buyer.slice(0, 2) !== sellerGstin.slice(0, 2);
+  return taxes.filter((t) => !t.supply || t.supply === 'any' || t.supply === (interState ? 'inter' : 'intra'));
 }
 
 export interface PricingDiscount {
   id: number;
   name: string;
   kind: 'percent' | 'fixed';
-  /** Basis points for percent, cents for fixed. */
+  /** Basis points for percent, paise for fixed. */
   value: number;
   minPurchase: number;
   minQuantity: number;
@@ -49,6 +63,8 @@ export interface PricedDocument {
   subtotal: number;
   discountTotal: number;
   taxTotal: number;
+  /** Tax per rule across all lines, which is what a GST invoice has to show. */
+  taxBreakdown: Array<{ name: string; amount: number }>;
   total: number;
   appliedDiscountIds: number[];
 }
@@ -146,10 +162,15 @@ export function priceLines(
     applied.add(discount.id);
   }
 
+  const byRule = new Map<string, number>();
   const priced = lines.map((line, i): PricedLine => {
     const net = gross[i] - lineDiscount[i];
     const rules = taxes.filter((t) => t.productType === null || t.productType === line.productType);
-    const tax = rules.reduce((sum, t) => sum + Math.round((net * t.rateBps) / 10_000), 0);
+    const tax = rules.reduce((sum, t) => {
+      const amount = Math.round((net * t.rateBps) / 10_000);
+      byRule.set(t.name, (byRule.get(t.name) ?? 0) + amount);
+      return sum + amount;
+    }, 0);
     return {
       key: line.key,
       gross: gross[i],
@@ -169,6 +190,7 @@ export function priceLines(
     subtotal: totalGross,
     discountTotal,
     taxTotal,
+    taxBreakdown: [...byRule].map(([name, amount]) => ({ name, amount })),
     total: totalGross - discountTotal + taxTotal,
     appliedDiscountIds: [...applied],
   };

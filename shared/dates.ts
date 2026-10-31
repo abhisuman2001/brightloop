@@ -10,7 +10,17 @@ const parse = (date: string) => {
 };
 const format = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 
-export const todayISO = () => new Date().toISOString().slice(0, 10);
+/** The business runs on Indian time, so "today" turns over at midnight IST on both server and browser. */
+const todayFormat = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
+export const todayISO = () => todayFormat.format(new Date());
+
+/** True only for a real calendar date in 'YYYY-MM-DD' form, so 2026-02-31 and 2026-13-45 are refused. */
+export function isValidDate(date: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const { y, m, d } = parse(date);
+  const utc = new Date(Date.UTC(y, m - 1, d));
+  return utc.getUTCFullYear() === y && utc.getUTCMonth() === m - 1 && utc.getUTCDate() === d;
+}
 
 export function addDays(date: string, days: number): string {
   const { y, m, d } = parse(date);
@@ -62,6 +72,16 @@ export function nextBillingDate(anchor: string, period: BillingPeriod, date: str
 /** First billing date on the anchor's schedule on or after `date`. */
 export function firstBillingDateOnOrAfter(anchor: string, period: BillingPeriod, date: string): string {
   return nextBillingDate(anchor, period, addDays(date, -1));
+}
+
+/**
+ * Whether a period starting on `date` should be invoiced. A longer period starting on the expiry
+ * date would charge a whole month or year for a single day, so only the first period or a daily
+ * plan can bill on that day.
+ */
+export function isBillableDate(date: string, startDate: string, expiryDate: string | null, period: BillingPeriod): boolean {
+  if (!expiryDate || date < expiryDate) return true;
+  return date === expiryDate && (date === startDate || period === 'daily');
 }
 
 /** Converts one billing period's amount into its monthly equivalent, for MRR. */

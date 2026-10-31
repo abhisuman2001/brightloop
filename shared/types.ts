@@ -52,6 +52,7 @@ export interface Product {
   salesPrice: number;
   costPrice: number;
   notes: string;
+  hsnCode: string;
   active: boolean;
   variants: Variant[];
 }
@@ -74,6 +75,19 @@ export interface Plan {
   activeSubscriptions: number;
 }
 
+export interface PublicPlan {
+  id: number;
+  name: string;
+  productName: string;
+  notes: string;
+  price: number;
+  billingPeriod: BillingPeriod;
+  minQuantity: number;
+  closable: boolean;
+  pausable: boolean;
+  renewable: boolean;
+}
+
 export interface TemplateLine {
   productId: number;
   variantId: number | null;
@@ -92,11 +106,22 @@ export interface QuotationTemplate {
   lines: TemplateLine[];
 }
 
+/** Under GST a sale inside the seller's state carries CGST and SGST, and one to another state carries IGST. */
+export type TaxSupply = 'any' | 'intra' | 'inter';
+
+export interface SellerInfo {
+  name: string;
+  address: string;
+  gstin: string;
+  upiId: string;
+}
+
 export interface TaxRule {
   id: number;
   name: string;
   rateBps: number;
   productType: ProductType | null;
+  supply: TaxSupply;
   active: boolean;
 }
 
@@ -131,6 +156,7 @@ export interface SubscriptionRow {
   nextInvoiceDate: string | null;
   status: SubscriptionStatus;
   paused: boolean;
+  pausable: boolean;
   overdue: boolean;
   quoteExpired: boolean;
   recurringAmount: number;
@@ -168,6 +194,7 @@ export interface SubscriptionDetail extends SubscriptionRow {
   paymentTermDays: number;
   validityDays: number;
   quoteValidUntil: string | null;
+  defaultRenewalDate: string | null;
   notes: string;
   closedReason: string | null;
   activatedAt: string | null;
@@ -201,6 +228,7 @@ export interface InvoiceRow {
 export interface InvoiceLine {
   id: number;
   productName: string;
+  hsnCode: string;
   variantLabel: string | null;
   quantity: number;
   unitPrice: number;
@@ -233,8 +261,30 @@ export interface InvoiceDetail extends InvoiceRow {
   subtotal: number;
   discountTotal: number;
   taxTotal: number;
+  taxBreakdown: Array<{ name: string; amount: number }>;
+  seller: SellerInfo;
+  lastReminderAt: string | null;
   lines: InvoiceLine[];
   payments: Payment[];
+}
+
+export interface ReconcileRow {
+  line: number;
+  paymentDate: string | null;
+  description: string;
+  reference: string;
+  amount: number;
+  method: PaymentMethod;
+  match: 'invoice' | 'amount' | 'duplicate' | 'none';
+  invoiceId: number | null;
+  invoiceNumber: string | null;
+  customerName: string | null;
+  problem: string | null;
+}
+
+export interface ReconcileResult {
+  rows: ReconcileRow[];
+  summary: { credits: number; matched: number; duplicates: number; unmatched: number; matchedAmount: number };
 }
 
 export interface InvoiceList extends Paged<InvoiceRow> {
@@ -270,6 +320,17 @@ export interface FinanceReport {
   byMethod: Array<{ method: PaymentMethod; amount: number; count: number }>;
   byPlan: Array<{ planId: number; plan: string; active: number; mrr: number }>;
   overdueInvoices: InvoiceRow[];
+  movement: {
+    startingMrr: number;
+    newMrr: number;
+    churnedMrr: number;
+    newSubscriptions: number;
+    churnedSubscriptions: number;
+    /** Share of the subscriptions and of the MRR in force at any point in the range that closed during it. Null with nothing to measure against. */
+    churnRatePct: number | null;
+    revenueChurnPct: number | null;
+    averagePerCustomer: number;
+  };
 }
 
 export interface BillingRunResult {
@@ -295,7 +356,7 @@ export interface BillingStatus {
 export interface SearchResults {
   subscriptions: Array<{ id: number; number: string; customerName: string; status: SubscriptionStatus }>;
   customers: Array<{ id: number; name: string; company: string; email: string }>;
-  invoices: Array<{ id: number; number: string; customerName: string; status: InvoiceStatus; total: number }>;
+  invoices: Array<{ id: number; number: string; customerName: string; status: InvoiceStatus; total: number; overdue: number }>;
 }
 
 export interface NotificationItem {
