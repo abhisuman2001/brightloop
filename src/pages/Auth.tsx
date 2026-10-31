@@ -5,7 +5,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { passwordProblems } from '../../shared/schemas';
 import type { SessionUser } from '../../shared/types';
 import { Logo } from '../components/Layout';
-import { Button, Card, Field, FormError, Input, cx, fieldErrors } from '../components/ui';
+import { Button, Card, Field, FormError, Input, cx, fieldErrors, isShownOnField } from '../components/ui';
 import { api } from '../lib/api';
 
 function AuthShell({ title, subtitle, children, footer }: { title: string; subtitle?: string; children: ReactNode; footer?: ReactNode }) {
@@ -13,7 +13,9 @@ function AuthShell({ title, subtitle, children, footer }: { title: string; subti
     <main className="flex min-h-screen flex-col items-center justify-center p-4">
       <div className="w-full max-w-sm">
         <div className="mb-5 flex justify-center">
-          <Logo />
+          <Link to="/" aria-label="Brightloop home">
+            <Logo />
+          </Link>
         </div>
         <Card className="p-5">
           <h1 className="text-base font-semibold text-slate-900">{title}</h1>
@@ -52,10 +54,10 @@ function PasswordChecklist({ password }: { password: string }) {
 
 function useSessionStart() {
   const client = useQueryClient();
-  const navigate = useNavigate();
   return (user: SessionUser) => {
+    // Nothing from a previous session may show to whoever signs in next. GuestOnly then moves them on.
+    client.removeQueries({ predicate: (q) => q.queryKey[0] !== 'me' });
     client.setQueryData(['me'], user);
-    navigate(user.role === 'customer' ? '/portal' : '/', { replace: true });
   };
 }
 
@@ -138,7 +140,7 @@ export function Signup() {
             </>
           )}
         </Field>
-        {Boolean(signup.error) && Object.keys(errors).length === 0 && <FormError error={signup.error} />}
+        {Boolean(signup.error) && !isShownOnField(signup.error, errors) && <FormError error={signup.error} />}
         <Button variant="primary" type="submit" className="w-full" loading={signup.isPending} disabled={passwordProblems(password).length > 0}>
           Create account
         </Button>
@@ -234,7 +236,7 @@ export function ResetPassword() {
             </>
           )}
         </Field>
-        {Boolean(reset.error) && Object.keys(errors).length === 0 && <FormError error={reset.error} />}
+        {Boolean(reset.error) && !isShownOnField(reset.error, errors) && <FormError error={reset.error} />}
         <Button variant="primary" type="submit" className="w-full" loading={reset.isPending} disabled={passwordProblems(password).length > 0}>
           Save password
         </Button>

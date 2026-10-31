@@ -1,26 +1,20 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Plus, Users } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { Customer, Paged } from '../../shared/types';
 import { CustomerForm } from '../components/CustomerDrawer';
 import { Button, Card, EmptyState, ErrorState, PageHeader, Pagination, SearchInput, TD, TH, TableSkeleton, cx } from '../components/ui';
 import { api, queryString } from '../lib/api';
 import { money } from '../lib/format';
-import { useDebounced, useDrawer, useUrlFilters } from '../lib/hooks';
+import { useSearchFilter, useDrawer, useUrlFilters } from '../lib/hooks';
 
 const PAGE_SIZE = 25;
 
 export default function Customers() {
   const { get, set, page } = useUrlFilters<'q'>();
   const drawer = useDrawer('cust');
-  const [text, setText] = useState(get('q'));
-  const q = useDebounced(text);
+  const { text, setText, q } = useSearchFilter(get('q'), (value) => set({ q: value }));
   const [creating, setCreating] = useState(false);
-
-  useEffect(() => {
-    if (q !== get('q')) set({ q });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q]);
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['customers', q, page],
