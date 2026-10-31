@@ -27,7 +27,18 @@ const FIRST = ['Aarav', 'Ananya', 'Maya', 'Liam', 'Noah', 'Priya', 'Sofia', 'Eth
 const LAST = ['Sharma', 'Patel', 'Nguyen', 'Garcia', 'Kim', 'Okafor', 'Rossi', 'Larsen', 'Mehta', 'Costa', 'Silva', 'Chen', 'Haddad', 'Novak', 'Iyer', 'Brooks', 'Reyes', 'Fischer', 'Tanaka', 'Bose'];
 const NAME_A = ['Northwind', 'Lumen', 'Harbor', 'Cedar', 'Vertex', 'Bluepeak', 'Ironwood', 'Solstice', 'Meridian', 'Kestrel', 'Oakline', 'Quanta', 'Riverbend', 'Atlas', 'Copperfield', 'Beacon', 'Stonebridge', 'Fernhill', 'Orchard', 'Pinecrest'];
 const NAME_B = ['Retail', 'Logistics', 'Studio', 'Foods', 'Health', 'Labs', 'Partners', 'Works', 'Systems', 'Traders', 'Dental', 'Motors', 'Media', 'Supply', 'Clinic', 'Consulting'];
-const CITIES = ['Bengaluru', 'Mumbai', 'Austin', 'Berlin', 'Toronto', 'Singapore', 'Lisbon', 'Dublin', 'Pune', 'Denver'];
+const CITIES = [
+  { name: 'Bengaluru', state: '29' },
+  { name: 'Mysuru', state: '29' },
+  { name: 'Mumbai', state: '27' },
+  { name: 'Pune', state: '27' },
+  { name: 'New Delhi', state: '07' },
+  { name: 'Chennai', state: '33' },
+  { name: 'Hyderabad', state: '36' },
+  { name: 'Ahmedabad', state: '24' },
+];
+const SAC_SOFTWARE = '998314';
+const SAC_SUPPORT = '998313';
 
 async function main() {
   if (process.env.NODE_ENV === 'production') throw new Error('The seeder is for development only.');
@@ -44,22 +55,23 @@ async function main() {
   const staffId = Number(insertUser.run('staff@brightloop.dev', 'Sam Rivera', hash, 'staff', null, now).lastInsertRowid);
   const actor = { id: staffId, name: 'Sam Rivera' };
 
-  const insertTax = db().prepare('INSERT INTO tax_rules (name, rate_bps, product_type) VALUES (?, ?, ?)');
-  insertTax.run('Sales Tax 8%', 800, null);
-  insertTax.run('Services Levy 2%', 200, 'service');
+  const insertTax = db().prepare('INSERT INTO tax_rules (name, rate_bps, product_type, supply) VALUES (?, ?, ?, ?)');
+  insertTax.run('CGST 9%', 900, null, 'intra');
+  insertTax.run('SGST 9%', 900, null, 'intra');
+  insertTax.run('IGST 18%', 1800, null, 'inter');
 
-  const insertProduct = db().prepare('INSERT INTO products (name, type, sales_price, cost_price, notes) VALUES (?, ?, ?, ?, ?)');
-  const product = (name: string, type: string, price: number, cost: number, notes: string) => Number(insertProduct.run(name, type, price, cost, notes).lastInsertRowid);
-  const cloud = product('Brightloop Cloud', 'software', 39_00, 8_00, 'Core subscription software, priced per seat.');
-  const erp = product('Brightloop ERP', 'software', 99_00, 22_00, 'Finance and operations suite for larger teams.');
-  const support = product('Priority Support', 'addon', 49_00, 15_00, 'Four-hour response on business days.');
-  const analytics = product('Advanced Analytics', 'addon', 29_00, 6_00, 'Custom reports and scheduled exports.');
-  const storage = product('Extra Storage 1 TB', 'addon', 9_00, 3_00, 'Additional document storage.');
-  const onboarding = product('Managed Onboarding', 'service', 150_00, 70_00, 'Hands-on setup with a Brightloop specialist.');
+  const insertProduct = db().prepare('INSERT INTO products (name, type, sales_price, cost_price, notes, hsn_code) VALUES (?, ?, ?, ?, ?, ?)');
+  const product = (name: string, type: string, price: number, cost: number, notes: string, hsn = SAC_SOFTWARE) => Number(insertProduct.run(name, type, price, cost, notes, hsn).lastInsertRowid);
+  const cloud = product('Brightloop Cloud', 'software', 2499_00, 500_00, 'Core subscription software, priced per seat.');
+  const erp = product('Brightloop ERP', 'software', 5999_00, 1400_00, 'Finance and operations suite for larger teams.');
+  const support = product('Priority Support', 'addon', 3999_00, 1200_00, 'Four-hour response on business days.', SAC_SUPPORT);
+  const analytics = product('Advanced Analytics', 'addon', 1999_00, 400_00, 'Custom reports and scheduled exports.');
+  const storage = product('Extra Storage 1 TB', 'addon', 499_00, 150_00, 'Additional document storage.');
+  const onboarding = product('Managed Onboarding', 'service', 14999_00, 7000_00, 'Hands-on setup with a Brightloop specialist.', SAC_SUPPORT);
   const insertVariant = db().prepare('INSERT INTO product_variants (product_id, attribute, value, extra_price) VALUES (?, ?, ?, ?)');
   const variant = (productId: number, attribute: string, value: string, extra: number) => Number(insertVariant.run(productId, attribute, value, extra).lastInsertRowid);
   const odoo = variant(cloud, 'Brand', 'Odoo', 560_00);
-  const whiteLabel = variant(cloud, 'Brand', 'White Label', 12_00);
+  const whiteLabel = variant(cloud, 'Brand', 'White Label', 999_00);
   const erpOdoo = variant(erp, 'Brand', 'Odoo', 560_00);
 
   const insertPlan = db().prepare(
@@ -67,13 +79,13 @@ async function main() {
   );
   const plan = (name: string, productId: number, price: number, period: string, min: number, autoClose: number, closable: number, pausable: number, renewable: number) =>
     ({ id: Number(insertPlan.run(name, productId, price, period, min, null, null, autoClose, closable, pausable, renewable).lastInsertRowid), period, min, price });
-  const starter = plan('Starter', cloud, 19_00, 'monthly', 1, 0, 1, 1, 1);
-  const growth = plan('Growth', cloud, 39_00, 'monthly', 3, 0, 1, 1, 1);
-  const scaleUp = plan('Scale-Up', erp, 99_00, 'monthly', 5, 0, 1, 0, 1);
-  const annual = plan('Enterprise Annual', erp, 890_00, 'yearly', 10, 1, 0, 0, 1);
-  const weekly = plan('Field Team Weekly', cloud, 9_00, 'weekly', 2, 0, 1, 1, 0);
-  const daily = plan('Event Pass Daily', cloud, 5_00, 'daily', 1, 1, 1, 0, 0);
-  const annualLite = plan('Growth Annual', cloud, 290_00, 'yearly', 3, 0, 1, 0, 1);
+  const starter = plan('Starter', cloud, 999_00, 'monthly', 1, 0, 1, 1, 1);
+  const growth = plan('Growth', cloud, 2499_00, 'monthly', 3, 0, 1, 1, 1);
+  const scaleUp = plan('Scale-Up', erp, 5999_00, 'monthly', 5, 0, 1, 0, 1);
+  const annual = plan('Enterprise Annual', erp, 59999_00, 'yearly', 10, 1, 0, 0, 1);
+  const weekly = plan('Field Team Weekly', cloud, 599_00, 'weekly', 2, 0, 1, 1, 0);
+  const daily = plan('Event Pass Daily', cloud, 299_00, 'daily', 1, 1, 1, 0, 0);
+  const annualLite = plan('Growth Annual', cloud, 24999_00, 'yearly', 3, 0, 1, 0, 1);
 
   const insertTemplate = db().prepare(
     `INSERT INTO quotation_templates (name, plan_id, validity_days, payment_term_days, plan_quantity, plan_variant_id, lines_json) VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -87,7 +99,7 @@ async function main() {
   );
   insertDiscount.run('Volume 10+ seats', 'percent', 10_00, 0, 10, null, null, null, 'subscription', '[]');
   insertDiscount.run('Enterprise 50+ seats', 'percent', 15_00, 0, 50, null, null, null, 'subscription', '[]');
-  insertDiscount.run('ERP launch offer', 'fixed', 150_00, 1_500_00, 0, addDays(today, -60), addDays(today, 30), 400, 'product', JSON.stringify([erp]));
+  insertDiscount.run('ERP launch offer', 'fixed', 5000_00, 50000_00, 0, addDays(today, -60), addDays(today, 30), 400, 'product', JSON.stringify([erp]));
   insertDiscount.run('Support bundle', 'percent', 20_00, 0, 0, addDays(today, -200), addDays(today, -90), 300, 'product', JSON.stringify([support]));
 
   const insertCustomer = db().prepare('INSERT INTO customers (name, company, email, phone, address, tax_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
@@ -98,7 +110,9 @@ async function main() {
       const company = `${pick(NAME_A)} ${pick(NAME_B)}`;
       const email = `${name.toLowerCase().replace(/\s+/g, '.')}.${i}@${company.toLowerCase().replace(/\s+/g, '')}.example`;
       const created = addDays(today, -between(1, HISTORY_DAYS));
-      const row = insertCustomer.run(name, company, email, `+1 555 01${String(between(0, 99)).padStart(2, '0')}`, `${between(10, 900)} Market Street, ${pick(CITIES)}`, i % 3 === 0 ? `TX${100000 + i}` : '', `${created}T09:00:00.000Z`);
+      const city = pick(CITIES);
+      const gstin = i % 3 === 0 ? `${city.state}AABCB${String(1000 + i).slice(-4)}C1Z5` : '';
+      const row = insertCustomer.run(name, company, email, `+91 98${String(between(0, 99_999_999)).padStart(8, '0')}`, `${between(10, 900)} MG Road, ${city.name}`, gstin, `${created}T09:00:00.000Z`);
       customers.push(Number(row.lastInsertRowid));
     }
   })();
@@ -194,7 +208,7 @@ async function main() {
       const span = daysDiff(inv.issue_date, inv.due_date);
       const paidOn = addDays(inv.issue_date, random() < 0.92 ? between(0, span) : between(span, span + 10));
       if (paidOn > yesterday) continue;
-      const partial = random() < 0.03 && inv.total > 500_00;
+      const partial = random() < 0.03 && inv.total > 20000_00;
       recordPayment(
         { invoiceId: inv.id, method: pick(methods), amount: partial ? Math.round(inv.total / 2) : inv.total, paymentDate: paidOn, note: partial ? 'Part payment, balance promised next week' : '' },
         actor,

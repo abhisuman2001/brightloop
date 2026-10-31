@@ -1,7 +1,7 @@
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import helmet from 'helmet';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,6 +14,7 @@ import { catalogRouter } from './routes/catalog';
 import { customersRouter } from './routes/customers';
 import { insightsRouter } from './routes/insights';
 import { portalRouter } from './routes/portal';
+import { publicRouter } from './routes/public';
 import { subscriptionsRouter } from './routes/subscriptions';
 import { teamRouter } from './routes/team';
 
@@ -63,12 +64,21 @@ export function createApp() {
     res.json({ status: 'ok' });
   });
   if (process.env.NODE_ENV !== 'test') {
+    const limits = { windowMs: 15 * 60_000, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Too many attempts. Please try again in a few minutes.' } } as const;
+    // Counts failures per account and address, so one person's typos never lock out a shared office or venue network.
     api.use(
-      ['/auth/login', '/auth/signup', '/auth/forgot-password', '/auth/reset-password'],
-      rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: 'Too many attempts. Please try again in a few minutes.' } }),
+      '/auth/login',
+      rateLimit({
+        ...limits,
+        limit: 10,
+        skipSuccessfulRequests: true,
+        keyGenerator: (req) => `${ipKeyGenerator(req.ip ?? '')}:${String(req.body?.email ?? '').trim().toLowerCase()}`,
+      }),
     );
+    api.use(['/auth/signup', '/auth/forgot-password', '/auth/reset-password'], rateLimit({ ...limits, limit: 60 }));
   }
   api.use('/auth', authRouter);
+  api.use('/public', publicRouter);
   api.use('/portal', portalRouter);
   api.use('/customers', customersRouter);
   api.use('/subscriptions', subscriptionsRouter);
@@ -89,7 +99,8 @@ export function createApp() {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof HttpError) return void res.status(err.status).json({ error: err.message, fields: err.fields });
-    const body = err as { type?: string; status?: number };
+    const body = err as { type?: string; status?: number; code?: string };
+    if (body?.code === 'SQLITE_CONSTRAINT_FOREIGNKEY') return void res.status(422).json({ error: 'That refers to a record that no longer exists' });
     if (body?.type === 'entity.parse.failed' || body?.type === 'entity.too.large') {
       return void res.status(body.status ?? 400).json({ error: 'That request could not be read' });
     }

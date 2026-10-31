@@ -5,6 +5,7 @@ import { hashPassword } from './auth';
 import { db, initDb } from './db';
 import { runBilling } from './services/billing';
 import { emailDeliveryConfigured } from './services/email';
+import { runReminders } from './services/reminders';
 
 const HOUR_MS = 3_600_000;
 
@@ -48,6 +49,10 @@ function runScheduledBilling() {
   }
 }
 
+function sendReminders() {
+  runReminders().catch((err) => console.error('Sending reminders failed; it will retry within the hour.', err));
+}
+
 function purgeExpiredSessions() {
   db().prepare('DELETE FROM sessions WHERE expires_at < ?').run(new Date().toISOString());
 }
@@ -61,8 +66,10 @@ async function main() {
   const server = createApp().listen(port, () => console.log(`Brightloop API listening on http://localhost:${port}`));
 
   runScheduledBilling();
+  sendReminders();
   const timer = setInterval(() => {
     runScheduledBilling();
+    sendReminders();
     purgeExpiredSessions();
   }, HOUR_MS);
 
