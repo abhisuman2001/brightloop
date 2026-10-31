@@ -5,12 +5,12 @@ import { BILLING_PERIODS, SUBSCRIPTION_STATUSES } from '../../shared/schemas';
 import type { SubscriptionList, SubscriptionRow } from '../../shared/types';
 import { api, queryString, refreshAll } from '../lib/api';
 import { PERIOD_LABEL, date, money, number } from '../lib/format';
-import { useDebounced, useDrawer, useUrlFilters } from '../lib/hooks';
+import { useSearchFilter, useDrawer, useUrlFilters } from '../lib/hooks';
 import { SUB_LABEL, SubscriptionBadges } from './badges';
 import { SubscriptionForm } from './SubscriptionForm';
 import { Badge, Button, Card, ConfirmDialog, EmptyState, ErrorState, IconButton, Menu, Pagination, SearchInput, TD, TH, TableSkeleton, cx, useToast } from './ui';
 
-type FilterKey = 'q' | 'status' | 'billing' | 'overdue' | 'group' | 'sort' | 'dir';
+type FilterKey = 'q' | 'status' | 'billing' | 'overdue' | 'expiring' | 'group' | 'sort' | 'dir';
 const GROUPS = { status: 'Lifecycle status', billing: 'Billing frequency', plan: 'Plan' } as const;
 type GroupKey = keyof typeof GROUPS;
 const PAGE_SIZE = 25;
@@ -39,25 +39,20 @@ export function SubscriptionTable() {
   const drawer = useDrawer('sub');
   const invoiceDrawer = useDrawer('inv');
   const toast = useToast();
-  const [text, setText] = useState(get('q'));
-  const q = useDebounced(text);
+  const { text, setText, q } = useSearchFilter(get('q'), (value) => set({ q: value }));
   const [creating, setCreating] = useState(false);
   const [cancelling, setCancelling] = useState<SubscriptionRow | null>(null);
 
   const status = get('status');
   const billing = get('billing');
   const overdue = get('overdue') === '1';
+  const expiring = get('expiring');
   const group = (get('group') || '') as GroupKey | '';
   const sort = get('sort');
   const dir = get('dir') || 'desc';
 
-  useEffect(() => {
-    if (q !== get('q')) set({ q });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q]);
-
   // Grouping sorts by the group first, so a group's rows sit together across pages.
-  const params = { q, status, billing, overdue: overdue ? 1 : null, sort: group || sort, dir: group ? 'asc' : sort ? dir : null };
+  const params = { q, status, billing, overdue: overdue ? 1 : null, expiring: expiring || null, sort: group || sort, dir: group ? 'asc' : sort ? dir : null, then: group ? sort : null, thenDir: group && sort ? dir : null };
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['subscriptions', params, page],
     queryFn: () => api.get<SubscriptionList>(`/subscriptions${queryString({ ...params, page, pageSize: PAGE_SIZE })}`),
@@ -76,6 +71,11 @@ export function SubscriptionTable() {
     },
   });
 
+  useEffect(() => {
+    rowAction.reset();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cancelling]);
+
   const generate = useMutation({
     mutationFn: (id: number) => api.post<{ invoiceId: number }>(`/subscriptions/${id}/invoice`),
     onSuccess: ({ invoiceId }) => {
@@ -91,9 +91,9 @@ export function SubscriptionTable() {
     else set({ sort: key, dir: 'desc' });
   };
 
-  const exportUrl = `/api/subscriptions/export.csv${queryString({ q, status, billing, overdue: overdue ? 1 : null })}`;
-  const hasFilters = Boolean(q || status || billing || overdue);
-  const activeFilterCount = Number(Boolean(status)) + Number(Boolean(billing)) + Number(overdue);
+  const exportUrl = `/api/subscriptions/export.csv${queryString({ q, status, billing, overdue: overdue ? 1 : null, expiring: expiring || null })}`;
+  const hasFilters = Boolean(q || status || billing || overdue || expiring);
+  const activeFilterCount = Number(Boolean(status)) + Number(Boolean(billing)) + Number(overdue) + Number(Boolean(expiring));
 
   return (
     <Card>
@@ -162,6 +162,7 @@ export function SubscriptionTable() {
         <div className="flex flex-wrap items-center gap-1.5 px-2.5 pb-2.5">
           {status && <FilterChip label={`Status: ${SUB_LABEL[status as keyof typeof SUB_LABEL] ?? status}`} onClear={() => set({ status: null })} />}
           {overdue && <FilterChip label="Overdue" onClear={() => set({ overdue: null })} />}
+          {expiring && <FilterChip label={`Expiring in ${expiring} days`} onClear={() => set({ expiring: null })} />}
           {billing && <FilterChip label={`Billing: ${PERIOD_LABEL[billing as keyof typeof PERIOD_LABEL] ?? billing}`} onClear={() => set({ billing: null })} />}
         </div>
       )}
@@ -246,7 +247,7 @@ export function SubscriptionTable() {
                               Resume
                             </Menu.Item>
                           ) : (
-                            <Menu.Item icon={<Pause className="size-3.5" />} disabled={row.status !== 'active'} onSelect={() => rowAction.mutate({ id: row.id, path: 'pause', done: `${row.number} paused` })}>
+                            <Menu.Item icon={<Pause className="size-3.5" />} disabled={row.status !== 'active' || !row.pausable} onSelect={() => rowAction.mutate({ id: row.id, path: 'pause', done: `${row.number} paused` })}>
                               Pause
                             </Menu.Item>
                           )}
@@ -274,7 +275,7 @@ export function SubscriptionTable() {
                 <Button
                   onClick={() => {
                     setText('');
-                    set({ q: null, status: null, billing: null, overdue: null });
+                    set({ q: null, status: null, billing: null, overdue: null, expiring: null });
                   }}
                 >
                   Clear filters

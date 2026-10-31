@@ -1,13 +1,13 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, keepPreviousData } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { addDays, type BillingPeriod } from '../../shared/dates';
 import { priceLines, type PricingDiscount, type PricingLine } from '../../shared/pricing';
 import type { Customer, Discount, Paged, Plan, Product, QuotationTemplate, SubscriptionDetail, TaxRule } from '../../shared/types';
 import { api, queryString, refreshAll } from '../lib/api';
-import { PERIOD_LABEL, PERIOD_UNIT, money, todayLocal } from '../lib/format';
+import { PERIOD_LABEL, PERIOD_UNIT, money, todayLocal, date } from '../lib/format';
 import { useDebounced, useDrawer } from '../lib/hooks';
-import { Button, Field, FormError, IconButton, Input, Modal, Select, Textarea, cx, fieldErrors, useToast } from './ui';
+import { Button, Field, FormError, IconButton, Input, Modal, Select, Textarea, cx, fieldErrors, isShownOnField, useToast } from './ui';
 
 interface LineDraft {
   productId: number | '';
@@ -83,7 +83,6 @@ export function SubscriptionForm({ open, onClose, editing, presetCustomer }: For
   const products = useQuery({ queryKey: ['products'], queryFn: () => api.get<Product[]>('/products'), enabled: open });
   const plans = useQuery({ queryKey: ['plans'], queryFn: () => api.get<Plan[]>('/plans'), enabled: open });
   const templates = useQuery({ queryKey: ['templates'], queryFn: () => api.get<QuotationTemplate[]>('/templates'), enabled: open });
-  const taxes = useQuery({ queryKey: ['taxes'], queryFn: () => api.get<TaxRule[]>('/taxes'), enabled: open });
   const discounts = useQuery({ queryKey: ['discounts'], queryFn: () => api.get<Discount[]>('/discounts'), enabled: open });
 
   const [templateId, setTemplateId] = useState<number | ''>('');
@@ -98,6 +97,8 @@ export function SubscriptionForm({ open, onClose, editing, presetCustomer }: For
   const [validityDays, setValidityDays] = useState('30');
   const [notes, setNotes] = useState('');
   const [lines, setLines] = useState<LineDraft[]>([]);
+
+  const taxes = useQuery({ queryKey: ['taxes', customerId], queryFn: () => api.get<TaxRule[]>(`/taxes${queryString({ customerId })}`), enabled: open, placeholderData: keepPreviousData });
 
   const save = useMutation({
     mutationFn: (body: object) => (editing ? api.put<SubscriptionDetail>(`/subscriptions/${editing.id}`, body) : api.post<SubscriptionDetail>('/subscriptions', body)),
@@ -196,7 +197,7 @@ export function SubscriptionForm({ open, onClose, editing, presetCustomer }: For
 
   const errors = fieldErrors(save.error);
   const period: BillingPeriod | undefined = plan?.billingPeriod;
-  const sellable = products.data?.filter((p) => p.active) ?? [];
+  const sellable = products.data?.filter((p) => p.active || lines.some((l) => l.productId === p.id)) ?? [];
   const available = plans.data?.filter((p) => (p.active || p.id === editing?.planId)) ?? [];
 
   return (
@@ -291,7 +292,7 @@ export function SubscriptionForm({ open, onClose, editing, presetCustomer }: For
           <Field label="Payment terms (days)" error={errors.paymentTermDays}>
             {(id) => (
               <Select id={id} value={paymentTermDays} onChange={(e) => setPaymentTermDays(e.target.value)}>
-                {[0, 7, 15, 30, 45, 60, 90].map((d) => (
+                {[...new Set([0, 7, 15, 30, 45, 60, 90, Number(paymentTermDays)])].sort((a, b) => a - b).map((d) => (
                   <option key={d} value={d}>
                     {d === 0 ? 'Due on receipt' : `Net ${d}`}
                   </option>
@@ -299,7 +300,7 @@ export function SubscriptionForm({ open, onClose, editing, presetCustomer }: For
               </Select>
             )}
           </Field>
-          <Field label="Quotation valid for (days)" error={errors.validityDays} hint={`Until ${addDays(todayLocal(), Number(validityDays) || 0)} if sent today`}>
+          <Field label="Quotation valid for (days)" error={errors.validityDays} hint={`Until ${date(addDays(todayLocal(), Math.min(Math.max(Number(validityDays) || 0, 0), 365)))} if sent today`}>
             {(id) => <Input id={id} type="number" min={1} max={365} className="num" value={validityDays} onChange={(e) => setValidityDays(e.target.value)} />}
           </Field>
         </div>
@@ -369,7 +370,7 @@ export function SubscriptionForm({ open, onClose, editing, presetCustomer }: For
             </dl>
           </div>
         )}
-        {Boolean(save.error) && Object.keys(errors).length === 0 && <FormError error={save.error} />}
+        {Boolean(save.error) && !isShownOnField(save.error, errors) && <FormError error={save.error} />}
       </form>
     </Modal>
   );

@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { PAYMENT_METHODS } from '../../shared/schemas';
 import type { InvoiceDetail, InvoiceList, InvoiceRow, PaymentMethod } from '../../shared/types';
 import { api, queryString, refreshAll } from '../lib/api';
-import { METHOD_LABEL, date, dollars, money, toCents, todayLocal } from '../lib/format';
+import { METHOD_LABEL, date, rupees, money, toPaise, todayLocal } from '../lib/format';
 import { useDebounced } from '../lib/hooks';
 import { Button, Field, FormError, Input, Modal, SearchInput, Select, Textarea, cx, fieldErrors, useToast } from './ui';
 
@@ -28,7 +28,7 @@ export function PaymentDialog({ open, onClose, invoice }: { open: boolean; onClo
     setPaymentDate(todayLocal());
     setNote('');
     setAmountError('');
-    setAmount(invoice ? dollars(invoice.balance) : '');
+    setAmount(invoice ? rupees(invoice.balance) : '');
   }, [open, invoice]);
 
   const outstanding = useQuery({
@@ -53,10 +53,10 @@ export function PaymentDialog({ open, onClose, invoice }: { open: boolean; onClo
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!target) return;
-    const cents = toCents(amount);
-    if (!cents) return setAmountError('Enter an amount greater than zero');
+    const paise = toPaise(amount);
+    if (!paise) return setAmountError('Enter an amount greater than zero');
     setAmountError('');
-    save.mutate({ invoiceId: target.id, method, amount: cents, paymentDate, note });
+    save.mutate({ invoiceId: target.id, method, amount: paise, paymentDate, note });
   };
   const errors = fieldErrors(save.error);
 
@@ -85,7 +85,7 @@ export function PaymentDialog({ open, onClose, invoice }: { open: boolean; onClo
                   type="button"
                   onClick={() => {
                     setPicked(row);
-                    setAmount(dollars(row.balance));
+                    setAmount(rupees(row.balance));
                   }}
                   className="flex w-full items-center justify-between gap-3 px-2.5 py-1.5 text-left hover:bg-slate-50"
                 >
@@ -105,7 +105,7 @@ export function PaymentDialog({ open, onClose, invoice }: { open: boolean; onClo
       )}
       {target && (
         <form id="payment-form" onSubmit={submit} className="grid grid-cols-2 gap-3">
-          <Field label="Amount (USD)" error={amountError || errors.amount}>
+          <Field label="Amount (INR)" error={amountError || errors.amount}>
             {(id) => <Input id={id} inputMode="decimal" className="num" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />}
           </Field>
           <Field label="Payment date" error={errors.paymentDate}>
